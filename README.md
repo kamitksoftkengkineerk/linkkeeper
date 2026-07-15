@@ -5,6 +5,50 @@ connection — USB tether, Wi-Fi hotspot, Ethernet, Bluetooth, even (opt-in) an
 open Wi-Fi network — and failing over automatically when one degrades or dies.
 No root, no subscription, stdlib-only Python.
 
+Install once and forget it: LinkKeeper stays loyal to this one PC, runs forever
+in the background, never stops scanning every wired and wireless link, and
+always hands the machine the best-quality connection available.
+
+## Why LinkKeeper — is there anything like it?
+
+Short answer: not in this exact slot. The thing that makes it different is that
+it **verifies real internet on each link independently** — so it catches the
+"gray failure" where a cable or Wi-Fi is *connected but has no internet*, which
+the free built-in options are blind to.
+
+| Solution | Free? | Checks *real internet* per link? | Any connection (wired/Wi-Fi/tether/BT)? | Local & private? |
+|---|---|---|---|---|
+| **LinkKeeper** | ✅ | ✅ per-link over its own pinned route | ✅ auto-discovers all | ✅ self-hosted |
+| **Speedify** | ❌ subscription | ✅ | ✅ | ❌ routes through their VPN |
+| **Windows Interface Metric** | ✅ built-in | ❌ **link-up only** | wired + Wi-Fi | ✅ |
+| **Intel Killer DoubleShot** | bundled | partial | needs Killer NIC hardware | ✅ |
+| **Wireless AutoSwitch** | trial | ❌ | just toggles Wi-Fi off on LAN | ✅ |
+| **Dual-WAN routers / pfSense** | varies | ✅ | router-level, not per-PC | ✅ |
+
+**What's genuinely unique**
+
+1. **Real-internet health checks per link.** Each link is probed over its *own*
+   pinned route, so a connected-but-dead link is caught and failed away from.
+   Windows' built-in metric method only sees "link up" and will happily sit on a
+   dead connection. This is the hardest part (Windows' weak-host model) and the
+   main reason LinkKeeper exists.
+2. **Free, local, private.** No subscription, no VPS, no VPN middleman routing
+   your traffic through someone else's servers.
+3. **The Advisor.** Nothing else *diagnoses why* a link dropped and hands you the
+   exact per-device fix (Samsung/OnePlus/Windows keep-alive settings).
+4. **Connection-agnostic.** Best link across USB tether, Ethernet, Wi-Fi,
+   Bluetooth, even opt-in open Wi-Fi — not Wi-Fi-only like most tools.
+
+**Honest gaps (what paid tools still beat us on):** Speedify *bonds* links to
+combine their speed (LinkKeeper does failover, not aggregation — bonding needs a
+server); LinkKeeper is Windows-only for now (Linux/Mac planned); and it's a
+sharp personal tool, not a supported product.
+
+**Verdict:** for "free, self-hosted, always-scanning, health-monitored,
+any-connection, loyal-to-one-PC," there is essentially nothing equivalent. The
+closest is Speedify (paid, VPN-routed, bonding-first); the only free alternative
+is Windows' static metric, which is blind to the exact failure LinkKeeper solves.
+
 ## Control panel (http://127.0.0.1:8901)
 
 A vanilla single-page app with a sidebar: **Dashboard** (live links, primary,
