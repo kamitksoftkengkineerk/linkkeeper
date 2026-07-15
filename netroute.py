@@ -396,8 +396,13 @@ def apply_windows_keepalive_fixes() -> str:
 
 
 def register_task() -> str:
-    """(Re)register the LinkKeeper logon Scheduled Task (elevated, this process
-    is already elevated). Mirrors install_task.ps1."""
+    """Ensure the LinkKeeper logon Scheduled Task exists (elevated). Idempotent:
+    if it's already installed, do nothing — re-registering would reset the task
+    the daemon is itself running as, which is pointless and disruptive."""
+    exists = _ps("if (Get-ScheduledTask -TaskName 'LinkKeeper' -ErrorAction "
+                 "SilentlyContinue) { 'yes' } else { 'no' }").strip()
+    if exists == "yes":
+        return "Autostart already installed"
     script = os.path.join(HERE, "linkkeeper.py")
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pythonw):

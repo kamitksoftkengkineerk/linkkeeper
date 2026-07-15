@@ -204,7 +204,10 @@ function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => (
 async function api(path, body, method){
   const o = {method: method || (body?'POST':'GET')};
   if(body){ o.headers={'Content-Type':'application/json'}; o.body=JSON.stringify(body); }
-  const r = await fetch(path,o); return r.headers.get('content-type')?.includes('json')? r.json(): r.text();
+  const r = await fetch(path,o);
+  const txt = await r.text();
+  if(!txt) return null;                       // empty body -> null (don't throw)
+  try { return JSON.parse(txt); } catch(e){ return txt; }
 }
 let STATUS={}, CONFIG={};
 function fmtAge(s){ return s<2?'just now':(s<60?Math.round(s)+'s ago':Math.round(s/60)+'m ago'); }
@@ -430,8 +433,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(read_config()))
         elif self.path.startswith("/api/command/"):
             cid = self.path.rsplit("/", 1)[-1]
-            res = commandbus.result(cid)
-            self._send(200 if res else 204, json.dumps(res) if res else "")
+            # Always valid JSON: `null` while pending (a 204 with an empty body
+            # made the browser's r.json() throw and hung the poll loop).
+            self._send(200, json.dumps(commandbus.result(cid)))
         else:
             self._send(404, json.dumps({"error": "not found"}))
 
