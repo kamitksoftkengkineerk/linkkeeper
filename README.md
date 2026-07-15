@@ -82,7 +82,7 @@ needs Windows Location on (the wizard/advisor prompts for it).
 
 - **Primary — Samsung M34 via USB tether.** Enable *Settings → Connections →
   Mobile Hotspot and Tethering → USB tethering*. Set M34's **active data SIM to
-  `0000`** (its only unlimited-5G SIM). Shows up on the PC as an "Ethernet"
+  `&lt;your-SIM&gt;`** (its only unlimited-5G SIM). Shows up on the PC as an "Ethernet"
   (Remote NDIS) adapter.
 - **Secondary — OnePlus 11R Wi-Fi hotspot.** Either SIM (both unlimited 5G).
   Connect the PC's Wi-Fi to it.
@@ -185,7 +185,7 @@ not routing gets bounced with `Restart-NetAdapter` automatically (no replug).
   guesses `2A70`): `Get-CimInstance Win32_NetworkAdapter -Filter "InterfaceIndex=<idx>" |
   Select PNPDeviceID` and update the `OnePlus-USB` rule if it differs. Once correct, cabling the
   OnePlus makes it a wired link that auto-wins primary whenever its latency beats M34.
-- **Wi-Fi auto-reconnect:** `wifi.autoreconnect` re-associates the PC to `wifi.ssid` (KKKKK)
+- **Wi-Fi auto-reconnect:** `wifi.autoreconnect` re-associates the PC to `wifi.ssid` (YOUR_HOTSPOT_SSID)
   via `netsh wlan connect` whenever it's not connected, so the OnePlus backup self-heals.
 - **Notifications:** `notify.enabled` pops a Windows toast on every primary switch.
 

@@ -40,7 +40,7 @@ DEVICE_GUIDES: dict = {
             {
                 "title": "Stop One UI from moving/killing mobile data",
                 "steps": [
-                    "Settings → Connections → SIM manager → Mobile data = SIM 0000 (unlimited 5G)",
+                    "Settings → Connections → SIM manager → Mobile data = your unlimited-data SIM",
                     "SIM manager → turn OFF 'Auto data switching'",
                     "SIM manager → turn OFF 'Switch mobile data during calls' if present",
                     "Settings → Connections → Data usage → turn OFF 'Set data limit' (it hard-cuts data at the threshold)",
@@ -92,7 +92,7 @@ DEVICE_GUIDES: dict = {
         ],
     },
     "OnePlus-WiFi": {
-        "device": "OnePlus 11R hotspot 'KKKKK'",
+        "device": "OnePlus 11R Wi-Fi hotspot",
         "prevent": [
             {
                 "title": "Keep the hotspot broadcasting",
@@ -107,13 +107,13 @@ DEVICE_GUIDES: dict = {
         ],
     },
     "M34-WiFi": {
-        "device": "Samsung M34 hotspot 'YOUR_HOTSPOT_SSID'",
+        "device": "Samsung Galaxy M34 Wi-Fi hotspot",
         "prevent": [
             {
                 "title": "Keep the M34 hotspot alive",
                 "steps": [
                     "Settings → Connections → Mobile Hotspot and Tethering → Mobile Hotspot → Advanced → 'Turn off when no devices are connected' = Never",
-                    "Keep mobile data ON for SIM 0000 (see M34-USB advice — same data rules apply)",
+                    "Keep mobile data ON for your unlimited-data SIM (see M34-USB advice — same data rules apply)",
                     "Data saver must be OFF (One UI refuses to run the hotspot with Data saver on)",
                 ],
                 "why": "One UI hotspots auto-off after idle minutes by default, and Data saver blocks them outright.",
@@ -153,7 +153,7 @@ WINDOWS_GUIDE = {
             "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' -Name HiberbootEnabled -Value 0 -Type DWord",
             "(Takes effect from the next shutdown; plain Restart never uses fast startup)",
         ],
-        "why": "Fast Startup resumes stale USB driver state from disk — the tether adapter appears but never gets internet until you replug. This PC currently has it ON.",
+        "why": "Fast Startup resumes stale USB driver state from disk — the tether adapter appears but never gets internet until you replug.",
     },
     "usb_hub_sleep": {
         "title": "Windows: stop USB hubs powering off (they suspend the phone hanging off them)",

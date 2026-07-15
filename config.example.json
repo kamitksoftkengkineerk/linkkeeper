@@ -1,0 +1,77 @@
+{
+  "_comment": "LinkKeeper config template. Copy to config.json and edit for your setup (the daemon auto-copies this on first run). Links are auto-discovered from any interface that owns a default gateway; the 'links' rules below just give friendly names / carrier labels and tell USB tethers apart by USB vendor id. Leave 'links': [] to auto-manage every default-route interface with generated names.",
+  "probe": {
+    "targets": [ [ "1.1.1.1", 443 ], [ "8.8.8.8", 53 ] ],
+    "pool": [ "1.0.0.1", "9.9.9.9", "208.67.222.222", "8.8.4.4", "208.67.220.220", "149.112.112.112" ],
+    "ports": [ 443, 53 ],
+    "interval_seconds": 4,
+    "timeout_seconds": 2,
+    "loss_window": 10,
+    "_comment": "Each link gets a dedicated IP from 'pool' and is health-checked over ITS OWN interface via a pinned /32 host route (so a backup link is verified correctly on Windows). loss_window=10 so one dropped probe = 10% loss. Orphaned routes are reconciled each cycle."
+  },
+  "decision": {
+    "fail_after_bad_probes": 3,
+    "switchback_dwell_seconds": 45,
+    "switch_margin_ms": 60,
+    "jitter_weight": 0.5,
+    "loss_weight_ms_per_pct": 20,
+    "wired_degraded_loss_pct": 25,
+    "prefer_wired": true,
+    "metric_primary": 10,
+    "metric_backup": 9000,
+    "_comment": "Best link = trusted first, then wired (while clean), then lowest score = latency + jitter_weight*jitter + loss_weight_ms_per_pct*loss%. Switch away from a healthy primary only on a better class or a score win > switch_margin_ms, after switchback_dwell_seconds (anti-flap)."
+  },
+  "links": [
+    {
+      "match_alias": "Ethernet",
+      "name": "Ethernet-LAN",
+      "carrier": "Wired ISP",
+      "expected": true,
+      "note": "Example: a wired broadband line. Match your NIC by the adapter description substring (e.g. '2.5GbE' or 'Realtek') so it never clashes with USB tethers."
+    },
+    {
+      "match_alias": "Remote NDIS",
+      "vid": "04E8",
+      "name": "PhoneA-USB",
+      "carrier": "Carrier A",
+      "expected": false,
+      "note": "Example: a phone USB tether. 'vid' is the USB vendor id (Samsung=04E8, OnePlus/OPPO=22D9, etc.) so two tethers are told apart. Find it: Get-CimInstance Win32_NetworkAdapter -Filter InterfaceIndex=N | Select PNPDeviceID."
+    },
+    {
+      "match_alias": "Wi-Fi",
+      "ssid": "YOUR_HOTSPOT_SSID",
+      "name": "PhoneA-WiFi",
+      "carrier": "Carrier A",
+      "note": "Example: a phone Wi-Fi hotspot, matched by SSID (substring, tolerates Windows' ' 2' duplicate-name suffix)."
+    }
+  ],
+  "advisor": {
+    "enabled": true,
+    "missing_after_seconds": 90,
+    "windows_check_minutes": 30,
+    "stale_cycles_before_bounce": 4,
+    "_comment": "Diagnoses why a link dropped (missing, no-internet, single-link, no carrier diversity, Windows power settings that kill tethers) with per-device fix steps in the dashboard/--advise."
+  },
+  "manage_unmatched": true,
+  "exclude": [ "TAP", "VPN", "Virtual", "Hyper-V", "VMware", "VirtualBox", "WSL", "Loopback", "Speedify", "TeamViewer", "ZeroTier", "Tailscale", "Wintun", "WAN Miniport", "Npcap", "Pseudo" ],
+  "_manage_note": "manage_unmatched:true = also monitor any internet-providing interface no rule names (Ethernet, another Wi-Fi, a new tether, Bluetooth). 'exclude' skips virtual/VPN/tunnel adapters by name substring.",
+  "wifi": {
+    "autoreconnect": true,
+    "ssids": [ "YOUR_HOTSPOT_SSID" ],
+    "adapter": "Wi-Fi",
+    "retry_seconds": 20,
+    "open_join": {
+      "enabled": false,
+      "min_signal_pct": 55,
+      "blocklist": [],
+      "scan_interval_seconds": 30,
+      "_comment": "OPT-IN, UNTRUSTED LAST RESORT. When enabled AND no trusted link is healthy AND Windows Location is on, LinkKeeper joins a password-free network that passes a captive-portal + real-internet check, treats it as untrusted, and drops it the instant a trusted link returns."
+    },
+    "_comment": "One Wi-Fi radio = one hotspot at a time. If not on any SSID in this priority list, LinkKeeper connects to the first available (once per retry_seconds)."
+  },
+  "ui": { "wizard_completed": false, "theme": "auto", "_comment": "wizard_completed:false triggers the first-run setup wizard." },
+  "notify": { "enabled": true, "_comment": "Windows toast on every primary switch." },
+  "speedtest": { "enabled": false, "interval_seconds": 3600, "url": "https://speed.cloudflare.com/__down?bytes=2000000", "note": "OFF by default. Ranks links by measured speed when on (uses data)." },
+  "manual_pin": null,
+  "logging": { "file": "logs/linkkeeper.log", "max_bytes": 1048576, "backups": 3 }
+}

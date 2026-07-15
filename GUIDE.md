@@ -22,8 +22,8 @@ back automatically:
 4. Never tap the "USB for file transfer / MTP" notification while tethered —
    any mode change kills tethering (don't browse the phone from Explorer)
 
-### 2. Keep mobile data alive on SIM 0000
-- SIM manager → **Mobile data = 0000** (the unlimited-5G SIM)
+### 2. Keep mobile data alive on SIM your unlimited-data SIM
+- SIM manager → **Mobile data = your unlimited-data SIM** (the unlimited-5G SIM)
 - SIM manager → **Auto data switching OFF** (silently moves data between SIMs;
   every switch drops tethered connections)
 - SIM manager → **Switch mobile data during calls OFF** (if present)
@@ -103,7 +103,7 @@ any regress (e.g. after a Windows update or power-plan switch).
 - **Stale tether recovery**: if Windows still shows a Remote NDIS adapter that
   stopped routing (post-sleep/fast-startup state), the daemon bounces it with
   `Restart-NetAdapter` automatically — the no-replug fix (max once/5 min).
-- **Wi-Fi**: reconnects to the best saved hotspot (KKKKK → YOUR_HOTSPOT_SSID) and
+- **Wi-Fi**: reconnects to the best saved hotspot (YOUR_HOTSPOT_SSID → YOUR_HOTSPOT_SSID_2) and
   rotates to the other hotspot if the current one has no internet.
 - **Everything else**: probing, best-link choice, failover, switch-back, toasts.
 
@@ -113,5 +113,6 @@ any regress (e.g. after a Windows update or power-plan switch).
 - Rear-panel USB ports, known **data** cables (charge-only cables = no tether)
 - Both phones can USB-tether simultaneously; Bluetooth PAN works as a slow
   last resort; the single Wi-Fi radio holds one hotspot at a time
-- Keep the two live links on **different carriers** (Jio + Airtel) so a carrier
+- Keep the two live links on **different carriers** (e.g. two different mobile
+  networks) so a carrier
   outage can't kill both

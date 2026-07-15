@@ -57,6 +57,12 @@ _wifi_bad_cycles = 0                         # consecutive cycles current hotspo
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
+    # First run (fresh clone): seed config.json from the shipped template.
+    if not os.path.exists(CONFIG_PATH):
+        example = os.path.join(HERE, "config.example.json")
+        if os.path.exists(example):
+            import shutil
+            shutil.copyfile(example, CONFIG_PATH)
     with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -637,7 +643,7 @@ def maybe_reconnect_wifi(cfg, dry_run):
 def _ssid_matches(configured: str, current: str) -> bool:
     """True if `current` (a Get-NetConnectionProfile name) is `configured`,
     allowing Windows' ' 2'/' 3' duplicate-name suffix — anchored so a different
-    network merely containing the SSID (e.g. 'KKKKK_EXT') does NOT match."""
+    network merely containing the SSID (e.g. 'MyHotspot_EXT') does NOT match."""
     import re
     return bool(re.fullmatch(re.escape(configured) + r"( \d+)?", current or "",
                              flags=re.IGNORECASE))

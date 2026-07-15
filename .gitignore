@@ -2,3 +2,8 @@
 logs/
 __pycache__/
 *.pyc
+
+# your personal config (SSIDs, carriers) — copied from config.example.json on
+# first run. Never commit this to a public repo.
+config.json
+config.json.tmp
