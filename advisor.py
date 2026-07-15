@@ -274,6 +274,17 @@ def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None):
         g = WINDOWS_GUIDE["usb_hub_sleep"]
         advice.append(_advice("win:hub-sleep", "info", g["title"], g["steps"], g["why"]))
 
+    # --- open-Wi-Fi opt-in needs Location ---
+    if (cfg.get("wifi", {}).get("open_join", {}).get("enabled")
+            and win_checks.get("location") is False):
+        advice.append(_advice(
+            "location-off", "warn",
+            "Open-Wi-Fi joining is on, but Windows Location is off — it can't scan",
+            ["Settings → Privacy & security → Location → turn ON 'Location services'",
+             "(only needed to discover NEW open networks; your saved hotspots don't need it)"],
+            "Windows blocks Wi-Fi network scanning unless Location services are enabled.",
+        ))
+
     return advice
 
 

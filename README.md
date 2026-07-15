@@ -1,8 +1,28 @@
 # LinkKeeper
 
-Keeps this Windows PC's internet **always on** by riding the best healthy phone
-link and failing over automatically when one degrades or dies. No root, no
-subscription, stdlib-only Python.
+Keeps this Windows PC's internet **always on** by riding the best healthy
+connection — USB tether, Wi-Fi hotspot, Ethernet, Bluetooth, even (opt-in) an
+open Wi-Fi network — and failing over automatically when one degrades or dies.
+No root, no subscription, stdlib-only Python.
+
+## Control panel (http://127.0.0.1:8901)
+
+A vanilla single-page app with a sidebar: **Dashboard** (live links, primary,
+switch history), **Connections** (the full saved registry), **Advisor** (why a
+link dropped + exact per-device fixes), and **Settings** (edit behavior live).
+A **first-run wizard** walks setup: detect connections → apply Windows
+keep-alive fixes → optional open-Wi-Fi → install autostart. The unelevated UI
+asks the elevated daemon to do privileged work over a file-based command
+channel (`commandbus.py`); POSTs are localhost-only and all network-derived
+text is HTML-escaped.
+
+## Open Wi-Fi (opt-in, untrusted, last resort)
+
+Off by default. When enabled in Settings, and **only** when every phone link is
+down, LinkKeeper scans for a password-free network, joins one that passes a
+captive-portal + real-internet check, uses it as an **untrusted** link (never
+ranked above your phones), and drops it the instant a phone is back. Scanning
+needs Windows Location on (the wizard/advisor prompts for it).
 
 ## How it works
 

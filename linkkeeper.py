@@ -31,7 +31,9 @@ from collections import deque
 from logging.handlers import RotatingFileHandler
 
 import advisor
+import commandbus
 import netroute
+import openwifi
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -295,15 +297,18 @@ def ensure_probe_routes(links, dry_run):
 # ---------------------------------------------------------------------------
 
 def _rank_key(lk, dec):
-    """Sort key for 'best link': wired first (if enabled), then quality score,
-    then preference as a final tiebreak. Lower is better.
-
-    A wired link only keeps its class privilege while it's CLEAN — once its
-    loss crosses wired_degraded_loss_pct it competes on score like everyone
-    else (a flapping USB tether must not beat a solid hotspot)."""
-    clean = lk.loss_pct < dec.get("wired_degraded_loss_pct", 10)
+    """Sort key for 'best link' (lower is better):
+      1. trusted first  — an untrusted auto-joined open network is only ever
+         chosen when no trusted link (your phones) is healthy.
+      2. wired first while CLEAN — a wired link keeps its class privilege until
+         its loss crosses wired_degraded_loss_pct (a flapping tether must not
+         beat a solid hotspot).
+      3. quality score (latency + jitter + loss).
+      4. preference tiebreak."""
+    trust_rank = 0 if lk.trusted else 1
+    clean = lk.loss_pct < dec.get("wired_degraded_loss_pct", 25)
     wired_rank = 0 if (dec.get("prefer_wired", True) and lk.wired and clean) else 1
-    return (wired_rank, lk.score, lk.preference)
+    return (trust_rank, wired_rank, lk.score, lk.preference)
 
 
 def choose_link(links, cfg, current_name):
@@ -342,7 +347,7 @@ def choose_link(links, cfg, current_name):
 
     # current still healthy but a rival looks better: require a better class OR
     # a meaningful score win, plus the dwell, before switching (anti-flap).
-    better_class = _rank_key(best, dec)[0] < _rank_key(current, dec)[0]
+    better_class = _rank_key(best, dec)[:2] < _rank_key(current, dec)[:2]
     margin = dec.get("switch_margin_ms", dec.get("latency_margin_ms", 60))
     better_score = current.score - best.score > margin
     if (better_class or better_score) and dwell_ok:
@@ -453,6 +458,7 @@ def refresh_win_checks(cfg):
     _win_checks["usb_suspend"] = netroute.usb_selective_suspend_enabled()
     _win_checks["fast_startup"] = netroute.fast_startup_enabled()
     _win_checks["hubs_sleepy"] = netroute.usb_hubs_allowed_to_sleep()
+    _win_checks["location"] = netroute.location_services_on()
     log.debug("win checks: usb_suspend=%s fast_startup=%s hubs=%d",
               _win_checks.get("usb_suspend"), _win_checks.get("fast_startup"),
               len(_win_checks.get("hubs_sleepy") or []))
@@ -557,6 +563,8 @@ def write_status(links, chosen, cfg, dry_run, advice=None):
                 "source_ip": lk.source_ip,
                 "healthy": lk.healthy,
                 "wired": lk.wired,
+                "trusted": lk.trusted,
+                "ssid": lk.ssid,
                 "latency_ms": None if lk.latency_ms == float("inf")
                               else round(lk.latency_ms, 1),
                 "jitter_ms": round(lk.jitter_ms, 1),
@@ -635,9 +643,48 @@ def _ssid_matches(configured: str, current: str) -> bool:
                              flags=re.IGNORECASE))
 
 
+def process_commands(cfg, dry_run):
+    """Execute privileged actions the (unelevated) dashboard requested via the
+    command channel. Only allowlisted actions run; each writes a result."""
+    if dry_run:
+        return
+    for cmd in commandbus.pending():
+        cid, action, cargs = cmd["id"], cmd["action"], cmd.get("args", {})
+        try:
+            if action == "apply_windows_fixes":
+                out = netroute.apply_windows_keepalive_fixes()
+                _win_checks["ts"] = 0.0  # force re-check so advice clears
+            elif action == "install_task":
+                out = netroute.register_task()
+            elif action == "uninstall_task":
+                out = netroute.unregister_task()
+            elif action == "scan_open":
+                out = netroute.wlan_scan_open()
+            elif action == "join_open":
+                openwifi.maybe_join(cfg)  # honours enabled/last-resort gating
+                out = openwifi.current_open() or "no open network joined"
+            elif action == "forget_open":
+                ssid = cargs.get("ssid", "")
+                netroute.wlan_remove_profile(ssid)
+                out = f"forgot {ssid}"
+            elif action == "enable_location_help":
+                out = netroute.open_location_settings()
+            else:
+                raise ValueError(f"unknown action {action}")
+            commandbus.complete(cid, True, out)
+            log.info("command %s (%s) ok", action, cid)
+        except Exception as exc:  # noqa: BLE001 - report to the UI, keep running
+            commandbus.complete(cid, False, str(exc))
+            log.warning("command %s failed: %s", action, exc)
+    commandbus.prune()
+
+
 def run_cycle(cfg, dry_run):
-    maybe_reconnect_wifi(cfg, dry_run)
+    process_commands(cfg, dry_run)
+    if not openwifi.is_joined():
+        maybe_reconnect_wifi(cfg, dry_run)  # openwifi owns the radio when joined
     links = managed_links(cfg)
+    openwifi.tag_links(links)               # mark any joined open net untrusted
     refresh_win_checks(cfg)
     if not links:
         log.warning("no managed WAN links found (are the phones connected?)")
@@ -657,6 +704,20 @@ def run_cycle(cfg, dry_run):
 
     update_advisor_state(links, cfg)
     maybe_recover_tethers(links, dry_run, cfg)
+
+    # Open-Wi-Fi as untrusted last resort: only when NO trusted link is healthy.
+    # The moment a trusted link (a phone) is healthy again, drop any open network.
+    trusted_healthy = any(lk.healthy and lk.trusted for lk in links)
+    if trusted_healthy:
+        openwifi.drop_if_joined(cfg, dry_run)
+    elif cfg.get("wifi", {}).get("open_join", {}).get("enabled"):
+        if openwifi.maybe_join(cfg, dry_run):
+            links = managed_links(cfg)          # re-discover to include the open link
+            openwifi.tag_links(links)
+            for lk in links:
+                st = _states.setdefault(lk.name, LinkState(cfg["probe"]["loss_window"]))
+                probe_link(lk, cfg, st)
+
     chosen = choose_link(links, cfg, _current_name)
     apply_choice(chosen, links, cfg, dry_run)
     advice = advisor.evaluate(links, cfg, _last_seen, _unhealthy_since, _win_checks)

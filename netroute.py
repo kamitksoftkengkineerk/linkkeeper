@@ -85,6 +85,7 @@ class WanLink:
     vid: str = ""           # USB vendor id (e.g. 04E8 Samsung, distinguishes tethers)
     wired: bool = True      # wired (USB tether / Ethernet) vs wireless (Wi-Fi)
     ssid: str = ""          # for wireless links, the hotspot SSID it's connected to
+    trusted: bool = True    # known/configured link; False = auto-joined open Wi-Fi
     # filled in by config matching / probing later
     name: str = ""
     preference: int = 100
@@ -198,6 +199,122 @@ def wifi_connect(ssid: str, adapter: str = "Wi-Fi") -> bool:
     return True
 
 
+# ---- open Wi-Fi (scan / join / captive-portal check) ------------------------
+
+def _netsh(args: list[str], timeout: int = 20):
+    """Run netsh directly (argv, no PowerShell) — literal args, UTF-8, hidden."""
+    return subprocess.run(
+        ["netsh"] + args, capture_output=True, encoding="utf-8",
+        errors="replace", creationflags=_NO_WINDOW, timeout=timeout,
+    )
+
+
+def location_services_on() -> bool | None:
+    """True if Windows Location is enabled (required to *scan* for new Wi-Fi
+    networks). None if unreadable."""
+    try:
+        out = _ps(
+            "(Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+            "\\CapabilityAccessManager\\ConsentStore\\location' -Name Value "
+            "-ErrorAction SilentlyContinue).Value"
+        )
+    except RuntimeError:
+        return None
+    return out.strip().lower() == "allow" if out.strip() else None
+
+
+def wlan_scan_open() -> list[dict]:
+    """Scan for OPEN (password-free) Wi-Fi networks. Needs Location + elevation.
+    Returns [{ssid, signal}] sorted by signal desc. Empty on any failure."""
+    try:
+        proc = _netsh(["wlan", "show", "networks", "mode=bssid"], timeout=25)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    nets, cur = [], None
+    for raw in (proc.stdout or "").splitlines():
+        line = raw.strip()
+        if line.startswith("SSID ") and ":" in line:
+            name = line.split(":", 1)[1].strip()
+            cur = {"ssid": name, "auth": "", "signal": 0}
+            if name:                      # skip hidden (empty) SSIDs
+                nets.append(cur)
+        elif cur is not None and line.lower().startswith("authentication"):
+            cur["auth"] = line.split(":", 1)[1].strip()
+        elif cur is not None and line.lower().startswith("signal"):
+            try:
+                cur["signal"] = int(line.split(":", 1)[1].strip().rstrip("%"))
+            except ValueError:
+                pass
+    opens = [{"ssid": n["ssid"], "signal": n["signal"]}
+             for n in nets if "open" in n["auth"].lower() and n["ssid"]]
+    opens.sort(key=lambda n: -n["signal"])
+    return opens
+
+
+_OPEN_PROFILE_XML = """<?xml version="1.0"?>
+<WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
+  <name>{name}</name>
+  <SSIDConfig><SSID><name>{name}</name></SSID></SSIDConfig>
+  <connectionType>ESS</connectionType>
+  <connectionMode>manual</connectionMode>
+  <MSM><security>
+    <authEncryption><authentication>open</authentication><encryption>none</encryption><useOneX>false</useOneX></authEncryption>
+  </security></MSM>
+</WLANProfile>"""
+
+
+def wlan_add_open_profile(ssid: str) -> None:
+    """Create + install a WLAN profile for an open network so we can connect."""
+    import tempfile
+    from xml.sax.saxutils import escape
+    xml = _OPEN_PROFILE_XML.format(name=escape(ssid))
+    fd, path = tempfile.mkstemp(suffix=".xml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(xml)
+        proc = _netsh(["wlan", "add", "profile", f"filename={path}",
+                       "interface=Wi-Fi", "user=all"])
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stdout or "").strip() or "add profile failed")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def wlan_remove_profile(ssid: str) -> None:
+    try:
+        _netsh(["wlan", "delete", "profile", f"name={ssid}"])
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+_CAPTIVE_HOST = "www.msftconnecttest.com"
+_CAPTIVE_PATH = "/connecttest.txt"
+_CAPTIVE_EXPECT = "Microsoft Connect Test"
+
+
+def captive_portal_ok(source_ip: str, timeout: float = 4.0) -> bool:
+    """True only if the link reaches the real internet (not a sign-in portal).
+    A captive portal answers with a redirect or its own HTML instead of the
+    expected body — so 'associated' but sign-in-required reads as NOT ok."""
+    import http.client
+    conn = http.client.HTTPConnection(_CAPTIVE_HOST, 80, timeout=timeout,
+                                      source_address=(source_ip, 0))
+    try:
+        conn.request("GET", _CAPTIVE_PATH)
+        resp = conn.getresponse()
+        body = resp.read(256).decode("ascii", "replace")
+        return resp.status == 200 and _CAPTIVE_EXPECT in body
+    except (OSError, http.client.HTTPException):
+        return False
+    finally:
+        conn.close()
+
+
 # ---- Windows power-setting checks (things that silently kill tethers) -------
 # Findings verified live on this PC 2026-07-15: selective-suspend output must be
 # parsed by the last two hex indexes (labels are localized); the RNDIS device
@@ -253,6 +370,57 @@ def usb_hubs_allowed_to_sleep() -> list[str]:
     except RuntimeError:
         return []
     return [l.strip() for l in out.splitlines() if l.strip()]
+
+
+def apply_windows_keepalive_fixes() -> str:
+    """Apply the three Windows fixes that keep tethers alive (USB selective
+    suspend off, Fast Startup off, USB hubs not powered off). Needs elevation.
+    Returns a summary string."""
+    _ps(
+        "powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 "
+        "48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0; "
+        "powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 "
+        "48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0; powercfg /setactive SCHEME_CURRENT; "
+        "Set-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Power' "
+        "-Name HiberbootEnabled -Value 0 -Type DWord; "
+        "Get-CimInstance -Namespace root/wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Enable -and ($_.InstanceName -like 'USB\\ROOT_HUB*' -or $_.InstanceName -like 'USB\\VID_*') } | "
+        "ForEach-Object { $_ | Set-CimInstance -Property @{ Enable = $false } }; exit 0",
+        timeout=40,
+    )
+    return "USB selective suspend off, Fast Startup off, USB hub power-off disabled"
+
+
+def register_task() -> str:
+    """(Re)register the LinkKeeper logon Scheduled Task (elevated, this process
+    is already elevated). Mirrors install_task.ps1."""
+    script = os.path.join(HERE, "linkkeeper.py")
+    pythonw = os.path.join(os.path.dirname(os.sys.executable), "pythonw.exe")
+    if not os.path.exists(pythonw):
+        pythonw = os.sys.executable
+    _ps(
+        "if (Get-ScheduledTask -TaskName 'LinkKeeper' -ErrorAction SilentlyContinue) "
+        "{ Unregister-ScheduledTask -TaskName 'LinkKeeper' -Confirm:$false }; "
+        f"$a=New-ScheduledTaskAction -Execute '{ps_quote(pythonw)}' -Argument '\"{ps_quote(script)}\"' -WorkingDirectory '{ps_quote(HERE)}'; "
+        "$t=New-ScheduledTaskTrigger -AtLogOn; "
+        "$s=New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Seconds 0); "
+        "$p=New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest; "
+        "Register-ScheduledTask -TaskName 'LinkKeeper' -Action $a -Trigger $t -Settings $s -Principal $p "
+        "-Description 'Keeps the PC internet on the best healthy link.' | Out-Null; exit 0",
+        timeout=30,
+    )
+    return "LinkKeeper autostart task registered"
+
+
+def unregister_task() -> str:
+    _ps("try { Unregister-ScheduledTask -TaskName 'LinkKeeper' -Confirm:$false "
+        "-ErrorAction Stop } catch { }; exit 0")
+    return "LinkKeeper autostart task removed"
+
+
+def open_location_settings() -> str:
+    _ps("Start-Process 'ms-settings:privacy-location'; exit 0")
+    return "Opened Windows Location settings"
 
 
 def stale_tether_adapters(active_if_indexes: set) -> list[str]:
