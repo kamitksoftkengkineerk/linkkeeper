@@ -14,8 +14,12 @@ work unprivileged; set_interface_metric() requires an elevated process.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from dataclasses import dataclass, field
+
+HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 # ---- low-level PowerShell helper -------------------------------------------
@@ -395,9 +399,9 @@ def register_task() -> str:
     """(Re)register the LinkKeeper logon Scheduled Task (elevated, this process
     is already elevated). Mirrors install_task.ps1."""
     script = os.path.join(HERE, "linkkeeper.py")
-    pythonw = os.path.join(os.path.dirname(os.sys.executable), "pythonw.exe")
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     if not os.path.exists(pythonw):
-        pythonw = os.sys.executable
+        pythonw = sys.executable
     _ps(
         "if (Get-ScheduledTask -TaskName 'LinkKeeper' -ErrorAction SilentlyContinue) "
         "{ Unregister-ScheduledTask -TaskName 'LinkKeeper' -Confirm:$false }; "

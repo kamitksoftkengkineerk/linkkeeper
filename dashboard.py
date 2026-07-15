@@ -252,7 +252,7 @@ function linkCard(l){
       <div class="stat"><div class="v">${l.jitter_ms==null?'—':l.jitter_ms}</div><div class="k">jitter</div></div>
       <div class="stat"><div class="v">${l.loss_pct}<span style=font-size:11px>%</span></div><div class="k">loss</div></div>
     </div>
-    <button class="${STATUS.manual_pin===l.name?'on':''}" onclick="pin('${esc(l.name)}',${STATUS.manual_pin===l.name})">
+    <button class="${STATUS.manual_pin===l.name?'on':''}" data-pin="${esc(l.name)}" data-pinned="${STATUS.manual_pin===l.name}">
       ${STATUS.manual_pin===l.name?'Unpin':'Pin as primary'}</button>
   </div>`;
 }
@@ -292,11 +292,11 @@ function renderAdvisor(){
 }
 function toggleRow(label, desc, path, checked){
   return `<div class="row"><div><div class="lbl">${label}</div><div class="desc">${desc}</div></div>
-    <label class="sw"><input type="checkbox" ${checked?'checked':''} onchange="setCfg('${path}',this.checked)"><span class="sl"></span></label></div>`;
+    <label class="sw"><input type="checkbox" ${checked?'checked':''} data-cfg="${path}" data-kind="bool"><span class="sl"></span></label></div>`;
 }
 function numRow(label, desc, path, val){
   return `<div class="row"><div><div class="lbl">${label}</div><div class="desc">${desc}</div></div>
-    <input type="number" value="${val}" onchange="setCfg('${path}',parseInt(this.value)||0)"></div>`;
+    <input type="number" value="${val}" data-cfg="${path}" data-kind="num"></div>`;
 }
 function renderSettings(){
   const c=CONFIG; if(!c.decision){ $('#v-settings').innerHTML='<h1>Settings</h1><p class=empty>loading…</p>'; return; }
@@ -313,7 +313,7 @@ function renderSettings(){
     ${toggleRow('Desktop toasts','Pop a notification on every link switch / new issue.','notify.enabled',c.notify.enabled)}
     <h2>Setup</h2>
     <div class="row"><div><div class="lbl">Re-run the setup wizard</div><div class="desc">Detect connections, apply Windows fixes, install autostart.</div></div>
-      <button onclick="setCfg('ui.wizard_completed',false);openWizard()">Open wizard</button></div>`;
+      <button data-act="openwizard">Open wizard</button></div>`;
 }
 
 // ---- actions ----
@@ -326,47 +326,67 @@ async function runCommand(action, args){
   return {ok:false,output:'timed out'};
 }
 
-// ---- wizard ----
-let WZ=0;
+// ---- wizard ---- (var, not let: inline onclick handlers can't see top-level let/const)
+var WZ=0;
 function openWizard(){ WZ=0; $('#wizard').classList.remove('hidden'); drawWizard(); }
 function closeWizard(){ $('#wizard').classList.add('hidden'); }
 const WSTEPS=['welcome','connections','winfix','openwifi','autostart','done'];
 function bars(){ return `<div class="wzsteps">${WSTEPS.map((_,i)=>`<i class="${i<=WZ?'on':''}"></i>`).join('')}</div>`; }
-function nav(back,next,nextLabel){ return `<div class="wzactions">
-  <button ${back?'':'disabled'} onclick="WZ--;drawWizard()">Back</button>
-  <button class="primary" onclick="${next}">${nextLabel||'Next'}</button></div>`; }
-async function drawWizard(){
+function nav(back,nextLabel){ return `<div class="wzactions">
+  <button ${back?'':'disabled'} data-act="back">Back</button>
+  <button class="primary" data-act="next">${nextLabel||'Next'}</button></div>`; }
+function drawWizard(){
   const el=$('#wizard'); const step=WSTEPS[WZ]; let h=bars();
   if(step==='welcome'){
-    h+=`<h3>Welcome to LinkKeeper</h3><p>It keeps this PC online by always using the best working connection — USB tether, Wi-Fi hotspot, Ethernet, even Bluetooth — and switching automatically when one fails. Let's set it up in a few steps.</p>`+nav(false,'WZ++;drawWizard()','Get started');
+    h+=`<h3>Welcome to LinkKeeper</h3><p>It keeps this PC online by always using the best working connection — USB tether, Wi-Fi hotspot, Ethernet, even Bluetooth — and switching automatically when one fails. Let's set it up in a few steps.</p>`+nav(false,'Get started');
   } else if(step==='connections'){
     const links=STATUS.links||[];
     h+=`<h3>Your connections</h3><p>These are the links LinkKeeper sees right now. Plug in phones / enable hotspots to add more — they're detected automatically.</p>
-      <div>${links.length?links.map(l=>`<span class="pill">${l.healthy?'🟢':'🔴'} ${esc(l.name)} · ${l.wired?'wired':'Wi-Fi'}</span>`).join(''):'<span class="empty">none detected yet</span>'}</div>`+nav(true,'WZ++;drawWizard()');
+      <div>${links.length?links.map(l=>`<span class="pill">${l.healthy?'🟢':'🔴'} ${esc(l.name)} · ${l.wired?'wired':'Wi-Fi'}</span>`).join(''):'<span class="empty">none detected yet</span>'}</div>`+nav(true);
   } else if(step==='winfix'){
     const issues=(STATUS.advice||[]).filter(a=>a.id&&a.id.startsWith('win:'));
     h+=`<h3>Windows keep-alive fixes</h3><p>Windows can silently suspend USB tethers and break them after shutdown. LinkKeeper detected:</p>
       <div id="wzfix">${issues.length?issues.map(a=>`<div class="pill bad">⚠ ${esc(a.title.replace('Windows: ',''))}</div>`).join(''):'<span class="ok">✓ none — already optimized</span>'}</div>
-      <div class="wzactions"><button onclick="WZ--;drawWizard()">Back</button>
-      ${issues.length?`<button class="primary" id="wzApply" onclick="wzApplyFixes()">Apply all fixes</button>`:`<button class="primary" onclick="WZ++;drawWizard()">Next</button>`}</div>`;
+      <div class="wzactions"><button data-act="back">Back</button>
+      ${issues.length?`<button class="primary" id="wzApply" data-act="apply">Apply all fixes</button>`:`<button class="primary" data-act="next">Next</button>`}</div>`;
   } else if(step==='openwifi'){
-    const oj=(CONFIG.wifi&&CONFIG.wifi.open_join)||{}; const loc=STATUS.advice&&STATUS.advice.some(a=>a.id==='location-off');
+    const oj=(CONFIG.wifi&&CONFIG.wifi.open_join)||{};
     h+=`<h3>Open Wi-Fi (optional)</h3><p>As a <b>last resort</b> — only when all your phones are down — LinkKeeper can join a password-free Wi-Fi network that has real internet. It's treated as untrusted and dropped the instant a phone is back.</p>
       ${toggleRow('Auto-join open Wi-Fi','Off by default. Needs Windows Location on to scan for networks.','wifi.open_join.enabled',oj.enabled)}
       ${oj.enabled?`<div class="row"><div><div class="lbl">Windows Location</div><div class="desc">Required to scan for new networks.</div></div>
-        <button onclick="runCommand('enable_location_help').then(()=>0)">Open Location settings</button></div>`:''}
-      `+nav(true,'WZ++;drawWizard()');
+        <button data-act="openloc">Open Location settings</button></div>`:''}
+      `+nav(true);
   } else if(step==='autostart'){
     h+=`<h3>Start automatically</h3><p>Install LinkKeeper as a background task so it runs (elevated) every time you log in.</p>
       <div id="wzTaskMsg" class="desc"></div>
-      <div class="wzactions"><button onclick="WZ--;drawWizard()">Back</button>
-      <button class="primary" id="wzInstall" onclick="wzInstall()">Install autostart</button></div>`;
+      <div class="wzactions"><button data-act="back">Back</button>
+      <button class="primary" id="wzInstall" data-act="install">Install autostart</button></div>`;
   } else if(step==='done'){
     h+=`<h3>All set 🎉</h3><p>LinkKeeper is now watching your connections and will keep this PC online automatically. You can tweak anything under Settings.</p>
-      <div class="wzactions"><span></span><button class="primary" onclick="finishWizard()">Finish</button></div>`;
+      <div class="wzactions"><span></span><button class="primary" data-act="finish">Finish</button></div>`;
   }
   el.innerHTML=`<div class="wzcard">${h}</div>`;
 }
+// One delegated click/change handler for the whole app — real addEventListener,
+// so it fires reliably (inline onclick can't see top-level let/const and was
+// unreliable under some embedded browsers).
+function doAct(a){
+  if(a==='next'){ WZ++; drawWizard(); }
+  else if(a==='back'){ WZ--; drawWizard(); }
+  else if(a==='apply') wzApplyFixes();
+  else if(a==='install') wzInstall();
+  else if(a==='finish') finishWizard();
+  else if(a==='openloc') runCommand('enable_location_help');
+  else if(a==='openwizard'){ setCfg('ui.wizard_completed',false); openWizard(); }
+}
+document.addEventListener('click', e=>{
+  const p=e.target.closest('[data-pin]'); if(p){ pin(p.dataset.pin, p.dataset.pinned==='true'); return; }
+  const a=e.target.closest('[data-act]'); if(a){ e.preventDefault(); doAct(a.dataset.act); }
+});
+document.addEventListener('change', e=>{
+  const c=e.target.closest('[data-cfg]'); if(!c) return;
+  setCfg(c.dataset.cfg, c.dataset.kind==='bool'? c.checked : (parseInt(c.value)||0));
+});
 async function wzApplyFixes(){ const b=$('#wzApply'); b.disabled=true; b.textContent='Applying… (accept UAC if asked)';
   const r=await runCommand('apply_windows_fixes'); b.textContent=r.ok?'✓ Applied':'Failed'; setTimeout(()=>{WZ++;drawWizard();},700); }
 async function wzInstall(){ const b=$('#wzInstall'); b.disabled=true; b.textContent='Installing…';
