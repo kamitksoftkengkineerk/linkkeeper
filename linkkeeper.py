@@ -123,6 +123,7 @@ def probe_link(link: "netroute.WanLink", cfg: dict, state: LinkState) -> None:
             best = ms if best is None else min(best, ms)
     ok = best is not None
     state.results.append(ok)
+    dec = cfg["decision"]
     if ok:
         state.consecutive_fail = 0
         state.latency_ms = best
@@ -130,19 +131,29 @@ def probe_link(link: "netroute.WanLink", cfg: dict, state: LinkState) -> None:
     else:
         state.consecutive_fail += 1
         state.latency_ms = float("inf")
-    link.healthy = ok
+    # Debounced health: a link only counts as DOWN after fail_after_bad_probes
+    # consecutive misses (recovery is still instant). This absorbs single-probe
+    # blips that would otherwise force a full failover every few seconds. A link
+    # that has never succeeded is not considered healthy on a miss.
+    fail_thresh = dec.get("fail_after_bad_probes", 3)
+    link.healthy = ok or (bool(state.latencies) and state.consecutive_fail < fail_thresh)
     link.latency_ms = state.latency_ms
     link.jitter_ms = state.jitter_ms
     link.loss_pct = state.loss_pct
     # quality score (lower is better): latency + weighted jitter + loss penalty.
     # Loss is weighted heavily — a 40%-loss link is near-unusable no matter how
     # fast its surviving packets are (observed live: lossy M34 must not beat
-    # clean Wi-Fi just because it's wired).
-    dec = cfg["decision"]
+    # clean Wi-Fi just because it's wired). During a debounced blip (healthy but
+    # this probe missed) we score off the last-good latency so the link doesn't
+    # jump to infinity and get dropped for a single miss; the rising loss_pct
+    # still degrades it gradually.
     jw = dec.get("jitter_weight", 0.5)
     lw = dec.get("loss_weight_ms_per_pct", 20)
-    link.score = (state.latency_ms + jw * state.jitter_ms
-                  + lw * state.loss_pct) if ok else float("inf")
+    if link.healthy:
+        base = best if ok else (state.latencies[-1] if state.latencies else float("inf"))
+        link.score = base + jw * state.jitter_ms + lw * state.loss_pct
+    else:
+        link.score = float("inf")
 
 
 # ---------------------------------------------------------------------------
@@ -178,14 +189,37 @@ def managed_links(cfg: dict) -> list["netroute.WanLink"]:
             lk.preference = 100
             result.append(lk)
 
-    # Give each managed link its OWN distinct probe target. Assign by sorted
-    # link name so it's stable across cycles/discovery-order and never collides
-    # (two links must not share a target, or they'd fight over its /32 route).
-    pool = cfg["probe"].get("pool", [])
-    if pool:
-        for i, lk in enumerate(sorted(result, key=lambda l: l.name)):
-            lk.probe_target = pool[i % len(pool)]
+    assign_probe_targets(result, cfg)
     return result
+
+
+# persistent link-name -> probe-target, so a link keeps its dedicated IP across
+# cycles (no churn) and targets never collide between two present links
+_target_map: dict[str, str] = {}
+
+
+def assign_probe_targets(links, cfg):
+    """Give each managed link a stable, distinct probe target from the pool.
+    Reuses a link's prior target; assigns a free one to new links; logs (and
+    leaves unprobed) any link beyond the pool size instead of colliding."""
+    pool = cfg["probe"].get("pool", [])
+    if not pool:
+        return
+    present = {lk.name for lk in links}
+    used = {t for n, t in _target_map.items() if n in present}
+    for lk in sorted(links, key=lambda l: l.name):
+        cur = _target_map.get(lk.name)
+        if cur in pool:
+            lk.probe_target = cur
+            continue
+        free = [p for p in pool if p not in used]
+        if not free:
+            log.error("more managed links than probe-pool IPs (%d) — %s left unprobed",
+                      len(pool), lk.name)
+            continue
+        _target_map[lk.name] = free[0]
+        used.add(free[0])
+        lk.probe_target = free[0]
 
 
 def _is_excluded(lk: "netroute.WanLink", excludes: list) -> bool:
@@ -204,7 +238,7 @@ def _rule_matches(rule: dict, lk: "netroute.WanLink") -> bool:
         return False
     if rule.get("vid") and rule["vid"].upper() != lk.vid.upper():
         return False
-    if rule.get("ssid") and rule["ssid"].lower() not in lk.ssid.lower():
+    if rule.get("ssid") and not _ssid_matches(rule["ssid"], lk.ssid):
         return False
     if "media" in rule:
         want_wired = rule["media"].lower() == "wired"
@@ -219,7 +253,21 @@ _pinned: dict[str, tuple] = {}
 
 def ensure_probe_routes(links, dry_run):
     """Make sure each link's probe target is pinned to a /32 route via that
-    link's gateway. Re-pins only when a link's gateway/index/target changes."""
+    link's gateway. Re-pins only when a link's gateway/index/target changes.
+    Vanished links have their cache entry AND their orphaned /32 route removed,
+    so (a) a reappearing link always re-pins (Windows drops ActiveStore routes
+    when an interface goes down) and (b) a stale /32 can't blackhole that IP."""
+    present = {lk.name for lk in links}
+    for name in list(_pinned):
+        if name not in present:
+            target = _pinned[name][0]
+            if not dry_run:
+                try:
+                    netroute.del_host_route(target)
+                except RuntimeError:
+                    pass
+            del _pinned[name]
+            _target_map.pop(name, None)
     for lk in links:
         if not lk.probe_target:
             continue
@@ -270,16 +318,23 @@ def choose_link(links, cfg, current_name):
     if not healthy:
         return None
 
-    # manual override wins if the pinned link is healthy
+    current = next((lk for lk in links if lk.name == current_name), None)
+    dwell_ok = (time.time() - _last_switch_at) > dec["switchback_dwell_seconds"]
+
+    # Manual override wins if the pinned link is healthy — but still respect the
+    # anti-flap dwell so a flapping pinned link doesn't flip the route every few
+    # seconds (unless it's already current, or nothing else is up).
     pin = cfg.get("manual_pin")
     if pin:
-        for lk in healthy:
-            if lk.name == pin:
-                return lk
+        pinned = next((lk for lk in healthy if lk.name == pin), None)
+        if pinned:
+            if current is None or current.name == pin or dwell_ok:
+                return pinned
+            return current  # hold current until dwell elapses
+        # pinned link not healthy: fall through to normal selection
 
     best = min(healthy, key=lambda lk: _rank_key(lk, dec))
 
-    current = next((lk for lk in links if lk.name == current_name), None)
     if current is None or not current.healthy:
         return best  # no current, or current died -> take the best now
     if best.name == current.name:
@@ -290,7 +345,6 @@ def choose_link(links, cfg, current_name):
     better_class = _rank_key(best, dec)[0] < _rank_key(current, dec)[0]
     margin = dec.get("switch_margin_ms", dec.get("latency_margin_ms", 60))
     better_score = current.score - best.score > margin
-    dwell_ok = (time.time() - _last_switch_at) > dec["switchback_dwell_seconds"]
     if (better_class or better_score) and dwell_ok:
         return best
     return current
@@ -302,6 +356,7 @@ def choose_link(links, cfg, current_name):
 
 _last_switch_at = 0.0
 _current_name = None
+_metric_fail_count = [0]   # consecutive Set-NetIPInterface failures (elevation?)
 
 
 def apply_choice(chosen, links, cfg, dry_run):
@@ -321,8 +376,16 @@ def apply_choice(chosen, links, cfg, dry_run):
                 log.info("[dry-run] would set %s metric %d -> %d",
                          lk.name, lk.metric, want)
             else:
-                netroute.set_interface_metric(lk.if_index, want)
-                lk.metric = want
+                # Tolerate a per-link failure (adapter unplugged mid-cycle, or an
+                # unelevated daemon) so the cycle still finishes and writes status
+                # instead of aborting before write_status/advisor.
+                try:
+                    netroute.set_interface_metric(lk.if_index, want)
+                    lk.metric = want
+                    _metric_fail_count[0] = 0
+                except RuntimeError as exc:
+                    _metric_fail_count[0] += 1
+                    log.warning("could not set metric on %s: %s", lk.name, exc)
 
     if changed:
         if not dry_run:
@@ -396,46 +459,73 @@ def refresh_win_checks(cfg):
 
 
 _last_recovery: dict = {}   # adapter name -> last Restart-NetAdapter attempt
+_stale_cycles: dict = {}    # adapter name -> consecutive cycles seen stale
 
 
-def maybe_recover_tethers(links, dry_run):
+def maybe_recover_tethers(links, dry_run, cfg):
     """Self-heal stale USB tethers: if Windows still shows a Remote NDIS
-    adapter that isn't routing (classic after suspend/resume or fast startup),
-    bounce it with Restart-NetAdapter — the no-replug recovery. Rate-limited
-    to once per 5 minutes per adapter."""
+    adapter that isn't routing, bounce it with Restart-NetAdapter — the
+    no-replug recovery. Only after it's been stale for several CONSECUTIVE
+    cycles, so a single transient discovery miss (mid-DHCP, a 1-cycle route
+    blip) can never bounce a live/recovering tether. Rate-limited 5 min."""
     if dry_run:
         return
     active = {lk.if_index for lk in links}
     try:
-        stale = netroute.stale_tether_adapters(active)
+        stale = set(netroute.stale_tether_adapters(active))
     except RuntimeError:
         return
+    need = cfg.get("advisor", {}).get("stale_cycles_before_bounce", 4)
     now = time.time()
+    for name in list(_stale_cycles):          # reset counters for no-longer-stale
+        if name not in stale:
+            del _stale_cycles[name]
     for name in stale:
+        _stale_cycles[name] = _stale_cycles.get(name, 0) + 1
+        if _stale_cycles[name] < need:
+            continue                          # not stale long enough yet
         if now - _last_recovery.get(name, 0) < 300:
             continue
         _last_recovery[name] = now
-        log.info("stale tether adapter '%s' — attempting Restart-NetAdapter recovery", name)
+        log.info("tether '%s' stale for %d cycles — Restart-NetAdapter recovery",
+                 name, _stale_cycles[name])
         try:
             netroute.restart_adapter(name)
         except RuntimeError as exc:
             log.warning("tether recovery failed for %s: %s", name, exc)
 
 
-def update_advisor_state(links):
-    """Track when each saved link was last seen / went unhealthy."""
+def update_advisor_state(links, cfg):
+    """Track when each saved link was last seen / went unhealthy. Prune state
+    for links that vanished so a reappearing link gets a fresh grace period and
+    LinkState. _wifi_bad_cycles counts ONLY the link actually on the Wi-Fi radio
+    (not e.g. a dead Bluetooth PAN), so a broken BT tether can't force the radio
+    to abandon a working hotspot."""
     global _wifi_bad_cycles
     now = time.time()
-    wireless_bad = False
+    present = {lk.name for lk in links}
+    for d in (_unhealthy_since, _last_seen):
+        for name in list(d):
+            if name != "_start" and name not in present:
+                d.pop(name, None)
+    for name in list(_states):
+        if name not in present:
+            del _states[name]
+
+    wifi_adapter = cfg.get("wifi", {}).get("adapter", "Wi-Fi").lower()
+    ssids = cfg.get("wifi", {}).get("ssids") or []
+    wifi_bad = False
     for lk in links:
         _last_seen[lk.name] = now
         if lk.healthy:
             _unhealthy_since.pop(lk.name, None)
         else:
             _unhealthy_since.setdefault(lk.name, now)
-            if not lk.wired:
-                wireless_bad = True
-    _wifi_bad_cycles = (_wifi_bad_cycles + 1) if wireless_bad else 0
+            on_radio = (lk.alias.lower() == wifi_adapter
+                        or any(s.lower() in lk.ssid.lower() for s in ssids if s))
+            if not lk.wired and on_radio:
+                wifi_bad = True
+    _wifi_bad_cycles = (_wifi_bad_cycles + 1) if wifi_bad else 0
 
 
 def toast_advice(advice, cfg):
@@ -508,24 +598,41 @@ def maybe_reconnect_wifi(cfg, dry_run):
     adapter = wc.get("adapter", "Wi-Fi")
     try:
         current = netroute.wifi_connected_ssid(adapter)
-        on_known = any(s.lower() in current.lower() for s in ssids if s)
-        rotate = on_known and _wifi_bad_cycles >= cfg["decision"]["fail_after_bad_probes"]
-        if on_known and not rotate:
-            return  # on one of our hotspots and it works — leave it
-        _last_wifi_attempt = time.time()
-        # If the current hotspot is up but has NO internet, rotate to the others
-        # first — "keep the PC online from any available connection".
-        candidates = ([s for s in ssids if s.lower() not in current.lower()] + ssids) if rotate else ssids
-        for ssid in candidates:  # priority order; stop at the first that sticks
-            log.info("Wi-Fi on '%s'%s — trying hotspot '%s'",
-                     current or "nothing", " (no internet)" if rotate else "", ssid)
+    except RuntimeError:
+        return
+    on_known = any(_ssid_matches(s, current) for s in ssids if s)
+    rotate = on_known and _wifi_bad_cycles >= cfg["decision"]["fail_after_bad_probes"]
+    if on_known and not rotate:
+        return  # on one of our hotspots and it works — leave it
+    _last_wifi_attempt = time.time()
+    # If the current hotspot is up but has NO internet, rotate to the others
+    # first — "keep the PC online from any available connection".
+    candidates = ([s for s in ssids if not _ssid_matches(s, current)] + ssids) if rotate else ssids
+    seen = set()
+    for ssid in candidates:  # priority order; stop at the first that sticks
+        if ssid in seen:
+            continue
+        seen.add(ssid)
+        log.info("Wi-Fi on '%s'%s — trying hotspot '%s'",
+                 current or "nothing", " (no internet)" if rotate else "", ssid)
+        try:
             netroute.wifi_connect(ssid, adapter)
-            time.sleep(3)
-            if ssid.lower() in netroute.wifi_connected_ssid(adapter).lower():
-                log.info("Wi-Fi connected to '%s'", ssid)
-                break
-    except RuntimeError as exc:
-        log.warning("wifi reconnect failed: %s", exc)
+        except RuntimeError as exc:
+            log.warning("  '%s' failed: %s", ssid, exc)  # e.g. no saved profile
+            continue
+        time.sleep(3)
+        if _ssid_matches(ssid, netroute.wifi_connected_ssid(adapter)):
+            log.info("Wi-Fi connected to '%s'", ssid)
+            break
+
+
+def _ssid_matches(configured: str, current: str) -> bool:
+    """True if `current` (a Get-NetConnectionProfile name) is `configured`,
+    allowing Windows' ' 2'/' 3' duplicate-name suffix — anchored so a different
+    network merely containing the SSID (e.g. 'KKKKK_EXT') does NOT match."""
+    import re
+    return bool(re.fullmatch(re.escape(configured) + r"( \d+)?", current or "",
+                             flags=re.IGNORECASE))
 
 
 def run_cycle(cfg, dry_run):
@@ -548,11 +655,19 @@ def run_cycle(cfg, dry_run):
                   lk.name, "UP  " if lk.healthy else "DOWN",
                   lk.latency_ms, st.loss_pct, lk.metric)
 
-    update_advisor_state(links)
-    maybe_recover_tethers(links, dry_run)
+    update_advisor_state(links, cfg)
+    maybe_recover_tethers(links, dry_run, cfg)
     chosen = choose_link(links, cfg, _current_name)
     apply_choice(chosen, links, cfg, dry_run)
     advice = advisor.evaluate(links, cfg, _last_seen, _unhealthy_since, _win_checks)
+    if _metric_fail_count[0] >= 3:
+        advice = [{
+            "id": "not-elevated", "severity": "crit",
+            "title": "Can't change routing — LinkKeeper needs to run as administrator",
+            "steps": ["Reinstall the autostart task (runs elevated): .\\install_task.ps1 -Run",
+                      "Or run the daemon from an elevated PowerShell"],
+            "why": "Set-NetIPInterface is failing, so failover can't actually switch links.",
+        }] + advice
     toast_advice(advice, cfg)
     write_status(links, chosen, cfg, dry_run, advice)
     return links
@@ -608,7 +723,7 @@ def cmd_advise(cfg):
         lat = f"{lk.latency_ms:.0f} ms" if lk.healthy else "-"
         print(f"{lk.name:<15}{'wired' if lk.wired else 'Wi-Fi':<9}"
               f"{'UP' if lk.healthy else 'DOWN':<7}{lat}")
-    update_advisor_state(links)
+    update_advisor_state(links, cfg)
     refresh_win_checks(cfg)
     # look far enough back that missing/unhealthy conditions trigger immediately
     horizon = time.time() - 10 * cfg.get("advisor", {}).get("missing_after_seconds", 90)
@@ -665,9 +780,15 @@ def main():
     log.info("LinkKeeper started (interval %ds, dry_run=%s)",
              cfg["probe"]["interval_seconds"], args.dry_run)
     interval = cfg["probe"]["interval_seconds"]
+    good_cfg = cfg  # last config that parsed — survive a bad concurrent write
     while True:
         try:
-            cfg = load_config()  # reload so config edits / manual_pin apply live
+            try:
+                cfg = load_config()  # reload so config edits / manual_pin apply live
+                good_cfg = cfg
+            except (OSError, ValueError) as exc:
+                log.warning("config reload failed (%s) — using last good config", exc)
+                cfg = good_cfg
             run_cycle(cfg, args.dry_run)
         except Exception as exc:  # noqa: BLE001 - never let the daemon die
             log.exception("cycle error: %s", exc)

@@ -24,20 +24,42 @@ from dataclasses import dataclass, field
 # (matters when the daemon runs headless under pythonw). CREATE_NO_WINDOW = 0x08000000.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
+# Force UTF-8 out so non-ASCII SSIDs/adapter names aren't mangled by the OEM
+# codepage (cp437) vs Python's cp1252 default. Prefixed to every script.
+_UTF8 = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
 
-def _ps(script: str) -> str:
-    """Run a PowerShell snippet and return stdout (raises on non-zero exit)."""
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-        capture_output=True,
-        text=True,
-        creationflags=_NO_WINDOW,
-    )
+# Default timeout so one hung PowerShell child (WMI stalls during USB
+# re-enumeration, wedged WLAN service) can never freeze the single-threaded
+# daemon loop forever.
+_PS_TIMEOUT = 15
+
+
+def ps_quote(value: str) -> str:
+    """Escape a value for a single-quoted PowerShell string (double the quotes).
+    Single-quoted PS strings have no other metacharacters, so this also blocks
+    injection via adapter names / SSIDs / notification text."""
+    return str(value).replace("'", "''")
+
+
+def _ps(script: str, timeout: int = _PS_TIMEOUT) -> str:
+    """Run a PowerShell snippet and return stdout (raises on non-zero exit or
+    timeout). UTF-8 output; hard timeout so a hung child can't wedge the loop."""
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", _UTF8 + script],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=_NO_WINDOW,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"PowerShell timed out after {timeout}s: {script[:80]}")
     if proc.returncode != 0:
         raise RuntimeError(
-            f"PowerShell failed ({proc.returncode}): {proc.stderr.strip() or script}"
+            f"PowerShell failed ({proc.returncode}): {(proc.stderr or '').strip() or script}"
         )
-    return proc.stdout.strip()
+    return (proc.stdout or "").strip()
 
 
 def _ps_json(script: str):
@@ -104,7 +126,7 @@ def discover_wan_interfaces() -> list[WanLink]:
     (0.0.0.0/0) — i.e. a real internet-providing link. Loopback and
     interfaces without a usable source IP are skipped. Single PS spawn.
     """
-    out = _ps(_DISCOVER_PS)
+    out = _ps(_DISCOVER_PS, timeout=30)  # CIM per-adapter can be slow
     if not out:
         return []
     data = json.loads(out)
@@ -147,7 +169,7 @@ def wifi_connected_ssid(adapter: str = "Wi-Fi") -> str:
     callers should match by substring rather than equality."""
     try:
         out = _ps(
-            f"(Get-NetConnectionProfile -InterfaceAlias '{adapter}' "
+            f"(Get-NetConnectionProfile -InterfaceAlias '{ps_quote(adapter)}' "
             "-ErrorAction SilentlyContinue).Name"
         )
     except RuntimeError:
@@ -155,10 +177,25 @@ def wifi_connected_ssid(adapter: str = "Wi-Fi") -> str:
     return out.strip()
 
 
-def wifi_connect(ssid: str, adapter: str = "Wi-Fi") -> None:
-    _ps(
-        f"netsh wlan connect name=\"{ssid}\" ssid=\"{ssid}\" interface=\"{adapter}\" | Out-Null; exit 0"
-    )
+def wifi_connect(ssid: str, adapter: str = "Wi-Fi") -> bool:
+    """Associate the Wi-Fi radio with a saved profile named `ssid`. Calls netsh
+    directly (argv list, no PowerShell parsing) so SSIDs with $, backticks or
+    quotes are passed literally. Returns True only if netsh reports success;
+    logs the reason (e.g. 'no profile') otherwise."""
+    try:
+        proc = subprocess.run(
+            ["netsh", "wlan", "connect", f"name={ssid}",
+             f"ssid={ssid}", f"interface={adapter}"],
+            capture_output=True, encoding="utf-8", errors="replace",
+            creationflags=_NO_WINDOW, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"netsh wlan connect failed: {exc}")
+    out = (proc.stdout or "").strip()
+    ok = proc.returncode == 0 and "request was completed successfully" in out.lower()
+    if not ok:
+        raise RuntimeError(out or f"netsh exit {proc.returncode}")
+    return True
 
 
 # ---- Windows power-setting checks (things that silently kill tethers) -------
@@ -242,8 +279,12 @@ def stale_tether_adapters(active_if_indexes: set) -> list[str]:
 
 def restart_adapter(name: str) -> None:
     """Bounce a network adapter (Restart-NetAdapter) — recovers a stale RNDIS
-    tether without physically replugging the cable. Needs elevation."""
-    _ps(f"Restart-NetAdapter -Name '{name}' -Confirm:$false; exit 0")
+    tether without physically replugging the cable. Needs elevation. Real
+    failures surface (RuntimeError) instead of being swallowed by 'exit 0'."""
+    _ps(
+        f"try {{ Restart-NetAdapter -Name '{ps_quote(name)}' -Confirm:$false "
+        f"-ErrorAction Stop; exit 0 }} catch {{ Write-Error $_; exit 1 }}"
+    )
 
 
 def notify(message: str, title: str = "LinkKeeper") -> None:
@@ -252,8 +293,8 @@ def notify(message: str, title: str = "LinkKeeper") -> None:
         "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType=WindowsRuntime] | Out-Null;"
         "$t=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);"
         "$x=$t.GetElementsByTagName('text');"
-        f"$x.Item(0).AppendChild($t.CreateTextNode('{title}'))|Out-Null;"
-        f"$x.Item(1).AppendChild($t.CreateTextNode('{message}'))|Out-Null;"
+        f"$x.Item(0).AppendChild($t.CreateTextNode('{ps_quote(title)}'))|Out-Null;"
+        f"$x.Item(1).AppendChild($t.CreateTextNode('{ps_quote(message)}'))|Out-Null;"
         "$n=[Windows.UI.Notifications.ToastNotification]::new($t);"
         "$id='{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';"
         "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($id).Show($n); exit 0"
@@ -265,20 +306,26 @@ def notify(message: str, title: str = "LinkKeeper") -> None:
 
 
 def _alias(if_index: int) -> str:
-    rows = _ps_json(
-        f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 "
-        "-ErrorAction SilentlyContinue | Select-Object InterfaceAlias"
-    )
+    try:
+        rows = _ps_json(
+            f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 "
+            "-ErrorAction SilentlyContinue | Select-Object InterfaceAlias"
+        )
+    except RuntimeError:
+        return str(if_index)  # suppressed pipeline error still exits 1 on Win
     return str(rows[0]["InterfaceAlias"]).strip() if rows else str(if_index)
 
 
 # ---- metric read / write ----------------------------------------------------
 
 def get_interface_metric(if_index: int) -> int:
-    rows = _ps_json(
-        f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 "
-        "-ErrorAction SilentlyContinue | Select-Object InterfaceMetric"
-    )
+    try:
+        rows = _ps_json(
+            f"Get-NetIPInterface -InterfaceIndex {if_index} -AddressFamily IPv4 "
+            "-ErrorAction SilentlyContinue | Select-Object InterfaceMetric"
+        )
+    except RuntimeError:
+        return -1
     return int(rows[0]["InterfaceMetric"]) if rows else -1
 
 

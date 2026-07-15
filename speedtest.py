@@ -144,7 +144,12 @@ def _parallel(worker, streams, secs) -> float:
 # ---- routing control (needs elevation) --------------------------------------
 
 def task(action: str):
-    netroute._ps(f"{action}-ScheduledTask -TaskName 'LinkKeeper' -ErrorAction SilentlyContinue")
+    # Failure-tolerant: if the LinkKeeper task isn't installed (fresh clone),
+    # PS 5.1's -EA SilentlyContinue still exits 1 — swallow it, force exit 0.
+    netroute._ps(
+        f"try {{ {action}-ScheduledTask -TaskName 'LinkKeeper' -ErrorAction Stop }} "
+        f"catch {{ }}; exit 0"
+    )
 
 
 def force_primary(links, primary):
@@ -194,9 +199,9 @@ def main():
     emit("-" * 59)
 
     results = []
-    task("Stop")
-    time.sleep(1.0)
     try:
+        task("Stop")   # inside try so restore_auto/task(Start) always run
+        time.sleep(1.0)
         for lk in links:
             force_primary(links, lk)
             time.sleep(args.settle)  # let routes flip + link revalidate

@@ -34,8 +34,12 @@ def set_pin(name):
     with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
         cfg = json.load(fh)
     cfg["manual_pin"] = name
-    with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+    # atomic write (tmp + os.replace) so the daemon, which re-reads config.json
+    # every 4s, never observes a truncated/half-written file
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, indent=2)
+    os.replace(tmp, CONFIG_PATH)
 
 
 PAGE = r"""<!doctype html>
