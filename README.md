@@ -198,3 +198,9 @@ not routing gets bounced with `Restart-NetAdapter` automatically (no replug).
   throughput ranking at the cost of periodic small downloads.
 - Bonding (combining both links' speed) is a separate, later project — see the
   plan (Speedify or self-hosted OpenMPTCProuter on a VPS).
+
+## License
+
+MIT — see [LICENSE](LICENSE). Provided **as is, without warranty of any kind**:
+LinkKeeper changes network routing and Windows power settings on the machine it
+runs on. Read what it does before pointing it at anything you care about.
