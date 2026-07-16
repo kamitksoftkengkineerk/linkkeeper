@@ -1,13 +1,43 @@
 # LinkKeeper
 
-Keeps this Windows PC's internet **always on** by riding the best healthy
-connection — USB tether, Wi-Fi hotspot, Ethernet, Bluetooth, even (opt-in) an
-open Wi-Fi network — and failing over automatically when one degrades or dies.
-No root, no subscription, stdlib-only Python.
+**Keep a Windows PC's internet always on.**
 
-Install once and forget it: LinkKeeper stays loyal to this one PC, runs forever
-in the background, never stops scanning every wired and wireless link, and
-always hands the machine the best-quality connection available.
+LinkKeeper watches every wired and wireless link you have — Ethernet, USB tether,
+Wi-Fi hotspot, Bluetooth, even (opt-in) open Wi-Fi — health-checks each one for
+**real internet**, and hands the PC whichever is genuinely best. When a link
+degrades or dies, it fails over in seconds. Install once and forget it.
+
+![LinkKeeper dashboard](docs/dashboard.png)
+
+![license](https://img.shields.io/badge/license-MIT-blue)
+![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d6)
+![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
+![dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+
+- 🔎 **Never stops scanning** — auto-discovers any interface that provides internet
+- 🩺 **Health-checks each link for real internet** over its *own* pinned route — so
+  it catches the "connected but no internet" failure Windows itself is blind to
+- ⚡ **Always the best link** — wired-first, then lowest latency + jitter + loss,
+  with anti-flap hysteresis
+- 🔁 **Self-healing** — reconnects dropped Wi-Fi, revives stale USB tethers
+- 💡 **Advisor** — tells you *why* a link died, with the exact per-device fix
+- 🔒 **Local & private** — no subscription, no VPN, no traffic through anyone's servers
+
+## Quick start
+
+```powershell
+git clone https://github.com/kamitksoftkengkineerk/linkkeeper
+cd linkkeeper
+python linkkeeper.py --status          # see your links right now (no admin needed)
+
+# install it for real (elevated PowerShell) — runs at every login
+.\install_task.ps1 -Run
+python dashboard.py                    # control panel: http://127.0.0.1:8901
+```
+
+First run copies `config.example.json` → `config.json` (yours, gitignored) and the
+dashboard's setup wizard walks you through the rest. Requires Windows + Python 3.10+.
+The daemon needs admin (it rewrites interface metrics); the dashboard doesn't.
 
 ## Why LinkKeeper — is there anything like it?
 
