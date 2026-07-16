@@ -108,18 +108,30 @@ needs Windows Location on (the wizard/advisor prompts for it).
    default route at it by rewriting the interface **metric**. Failover away is
    fast; switch-back waits out a dwell time so links don't flap.
 
-## Physical setup
+## Physical setup (any combination works)
 
-- **Primary — Samsung M34 via USB tether.** Enable *Settings → Connections →
-  Mobile Hotspot and Tethering → USB tethering*. Set M34's **active data SIM to
-  `&lt;your-SIM&gt;`** (its only unlimited-5G SIM). Shows up on the PC as an "Ethernet"
-  (Remote NDIS) adapter.
-- **Secondary — OnePlus 11R Wi-Fi hotspot.** Either SIM (both unlimited 5G).
-  Connect the PC's Wi-Fi to it.
+LinkKeeper doesn't care *what* your links are — it discovers whatever provides
+internet. Common setups:
 
-Both links live at once = seamless failover. Spare SIMs (OnePlus 2nd SIM, or
-M34 `3084`) are manual backups — swap the active data SIM in phone settings if a
-live SIM fails hard.
+- **Wired broadband + phone backup** — Ethernet as the fast primary, a phone
+  hotspot or USB tether as the failover.
+- **Two phones** — one USB-tethered, the other on Wi-Fi hotspot.
+- **Different carriers on each link** — so one carrier's outage can't take you
+  offline. This matters more than raw speed.
+
+Tips that make a real difference:
+
+- **USB tether beats Wi-Fi hotspot** for the always-on link: it charges the phone
+  and has no "turn off when no devices are connected" idle timer.
+- On the phone, set **Developer options → Default USB configuration → USB
+  tethering** — otherwise Android turns tethering off on *every* cable event.
+- Use a real **data** cable in a rear USB port (charge-only cables fail silently),
+  and keep the phone's own Wi-Fi off while USB tethering so it can't steal the
+  upstream.
+
+See **[GUIDE.md](GUIDE.md)** for the full per-device keep-alive checklist
+(Samsung One UI, OnePlus OxygenOS, and the Windows power settings that silently
+suspend tethers).
 
 ## Run it
 
