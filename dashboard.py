@@ -97,14 +97,21 @@ PAGE = r"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LinkKeeper</title>
 <style>
-  :root{ --bg:#0a0e16; --bg2:#0e131e; --card:rgba(255,255,255,.05); --card2:rgba(255,255,255,.08);
-    --stroke:rgba(255,255,255,.10); --txt:#e8edf6; --dim:#8a97ad; --up:#39d98a; --down:#ff5c6c;
-    --pri:#4c9ffe; --warn:#ffb020; --acc:#7c5cff; }
-  @media (prefers-color-scheme: light){ :root{ --bg:#eef1f6; --bg2:#e6eaf1; --card:rgba(0,0,0,.03);
-    --card2:rgba(0,0,0,.05); --stroke:rgba(0,0,0,.10); --txt:#141a24; --dim:#5a6676; } }
+  /* Warm Rail palette — see C:\Users\User\Desktop\Amit Launchers\Team Status\DESIGN.md.
+     Dark-only per spec (the old light-mode variant is dropped); the blue radial
+     glow is dropped too — spec rule is "no cool blue-greys anywhere". */
+  :root{ --bg:#141413; --bg2:#1c1b19; --card:rgba(255,255,255,.05); --card2:rgba(255,255,255,.08);
+    --stroke:#30302e; --txt:#f2efe9; --dim:#b3ada2; --up:#8fae6c; --down:#c9584c;
+    --pri:#cc785c; --warn:#d4a83a; --acc:#cc785c; }
+  * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.14) transparent; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 8px;
+    border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.30); background-clip: content-box; }
   *{box-sizing:border-box} html,body{height:100%}
   body{margin:0;font:14.5px/1.55 -apple-system,Segoe UI,Roboto,system-ui,sans-serif;color:var(--txt);
-    background:radial-gradient(1100px 600px at 78% -12%,#182741 0,var(--bg) 60%);display:flex;min-height:100vh}
+    background:var(--bg);display:flex;min-height:100vh}
   a{color:var(--pri);text-decoration:none}
   /* sidebar */
   .side{width:230px;flex:0 0 230px;background:linear-gradient(180deg,var(--bg2),transparent);
@@ -126,25 +133,25 @@ PAGE = r"""<!doctype html>
   h1{font-size:22px;font-weight:650;margin:0 0 3px}
   .sub{color:var(--dim);font-size:13px;margin:0 0 22px}
   h2{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim);margin:30px 0 12px}
-  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+  .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(230px,100%),1fr))}
   .card{background:var(--card);border:1px solid var(--stroke);border-radius:16px;padding:16px 18px;position:relative}
-  .card.primary{border-color:rgba(76,159,254,.55);box-shadow:0 0 0 1px rgba(76,159,254,.22) inset}
-  .card.untrusted{border-color:rgba(255,176,32,.5)}
+  .card.primary{border-color:rgba(204,120,92,/*--pri*/ .55);box-shadow:0 0 0 1px rgba(204,120,92,/*--pri*/ .22) inset}
+  .card.untrusted{border-color:rgba(212,168,58,/*--warn*/ .5)}
   .badgep{position:absolute;top:14px;right:14px;font-size:11px;font-weight:700;color:var(--pri);
-    border:1px solid rgba(76,159,254,.5);border-radius:20px;padding:2px 9px}
+    border:1px solid rgba(204,120,92,/*--pri*/ .5);border-radius:20px;padding:2px 9px}
   .name{font-size:16px;font-weight:600;display:flex;align-items:center;gap:9px}
   .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
   .dot.up{background:var(--up);box-shadow:0 0 9px var(--up)} .dot.down{background:var(--down);box-shadow:0 0 9px var(--down)}
   .tag{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);
     border:1px solid var(--stroke);border-radius:20px;padding:1px 7px;margin-left:auto}
-  .tag.warn{color:var(--warn);border-color:rgba(255,176,32,.5)}
+  .tag.warn{color:var(--warn);border-color:rgba(212,168,58,/*--warn*/ .5)}
   .alias{color:var(--dim);font-size:12px;margin:3px 0 13px;word-break:break-all}
   .stats{display:flex;gap:16px;margin-bottom:13px} .stat .v{font-size:19px;font-weight:650}
   .stat .k{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
   button{font:inherit;color:var(--txt);background:var(--card2);border:1px solid var(--stroke);border-radius:10px;
     padding:8px 13px;cursor:pointer;transition:.15s;font-weight:500}
-  button:hover{background:rgba(255,255,255,.16)} button.on{background:var(--pri);border-color:var(--pri);color:#04101f}
-  button.primary{background:var(--pri);border-color:var(--pri);color:#04101f}
+  button:hover{background:rgba(255,255,255,.16)} button.on{background:var(--pri);border-color:var(--pri);color:#241812}
+  button.primary{background:var(--pri);border-color:var(--pri);color:#241812}
   button:disabled{opacity:.5;cursor:default}
   table{width:100%;border-collapse:collapse;font-size:13px}
   td,th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--stroke)} th{color:var(--dim);font-weight:500}
@@ -162,7 +169,7 @@ PAGE = r"""<!doctype html>
     border-radius:9px;padding:7px 10px;font:inherit;width:90px}
   /* advice */
   .adv{background:var(--card);border:1px solid var(--stroke);border-radius:13px;padding:11px 15px;margin-bottom:10px}
-  .adv.crit{border-color:rgba(255,92,108,.55)} .adv.warn{border-color:rgba(255,176,32,.45)}
+  .adv.crit{border-color:rgba(201,88,76,/*--down*/ .55)} .adv.warn{border-color:rgba(212,168,58,/*--warn*/ .45)}
   .adv summary{cursor:pointer;font-weight:600;list-style:none} .adv summary::-webkit-details-marker{display:none}
   .adv .why{color:var(--dim);font-size:12.5px;margin:8px 0 2px} .adv ol{margin:6px 0 4px 20px;font-size:13px}
   .adv .sev{margin-right:6px} .adv.crit .sev{color:var(--down)} .adv.warn .sev{color:var(--warn)} .adv.info .sev{color:var(--pri)}
