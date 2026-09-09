@@ -40,6 +40,7 @@ ALLOWED_SETTINGS = {
     "manual_pin", "ui.theme", "ui.wizard_completed",
     "netscan.enabled", "netscan.alert_new_devices",
     "netscan.scan_interval_seconds", "netscan.known", "netscan.ignore",
+    "netscan.scan_wifi", "netscan.wifi_scan_interval_seconds",
 }
 
 
@@ -160,6 +161,19 @@ PAGE = r"""<!doctype html>
   table{width:100%;border-collapse:collapse;font-size:13px}
   td,th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--stroke)} th{color:var(--dim);font-weight:500}
   .empty{color:var(--dim)}
+  h2.nsec{margin-top:34px}
+  .wifi-list{display:flex;flex-direction:column;gap:2px}
+  .wifi-row{display:flex;align-items:center;gap:12px;padding:9px 14px;background:var(--card);
+    border:1px solid var(--stroke);border-radius:10px}
+  .wifi-ssid{font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .wifi-meta{color:var(--dim);font-size:12px;white-space:nowrap}
+  .wifi-sig{color:var(--dim);font-size:12px;width:38px;text-align:right;font-variant-numeric:tabular-nums}
+  .wifi-bars{display:inline-flex;align-items:flex-end;gap:2px;height:15px;width:20px}
+  .wifi-bars i{width:3px;background:var(--stroke);border-radius:1px}
+  .wifi-bars i:nth-child(1){height:35%} .wifi-bars i:nth-child(2){height:55%}
+  .wifi-bars i:nth-child(3){height:78%} .wifi-bars i:nth-child(4){height:100%}
+  .wifi-bars.b1 i:nth-child(-n+1),.wifi-bars.b2 i:nth-child(-n+2),
+  .wifi-bars.b3 i:nth-child(-n+3),.wifi-bars.b4 i:nth-child(-n+4){background:var(--up)}
   .row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;background:var(--card);
     border:1px solid var(--stroke);border-radius:14px;margin-bottom:10px}
   .row .lbl{font-weight:600} .row .desc{color:var(--dim);font-size:12.5px;margin-top:2px;max-width:560px}
@@ -308,27 +322,50 @@ function deviceCard(d){
   const known = d.known || knownMacs.includes(d.mac);   // reflect a fresh Trust before the next daemon scan
   const isnew = d.is_new && !known;
   const tag = known?'trusted' : (isnew?'NEW' : (d.randomized?'randomized':'seen'));
-  const title = esc(d.name || d.ip || d.mac);
+  const maker = d.vendor || '';
+  const title = esc(d.name || maker || d.ip || d.mac);
+  const makerLine = (maker && d.name) ? `${esc(maker)} · ` : '';   // avoid repeating maker when it is the title
   const btns = known
     ? `<button data-name="${esc(d.mac)}">Rename</button>`
     : `<button class="on" data-trust="${esc(d.mac)}">Trust</button><button data-name="${esc(d.mac)}">Name</button>`;
   return `<div class="card ${isnew?'untrusted':''}">
     <div class="name"><span class="dot ${d.online?'up':'down'}"></span>${title}
       <span class="tag ${isnew?'warn':''}">${tag}</span></div>
-    <div class="alias">${esc(d.ip||'—')} · ${esc(d.mac)}${d.randomized?' · randomized MAC':''}</div>
+    <div class="alias">${makerLine}${esc(d.ip||'—')} · ${esc(d.mac)}${d.randomized?' · randomized MAC':''}</div>
     <div class="stats">
       <div class="stat"><div class="v">${d.online?'online':'offline'}</div><div class="k">status</div></div>
+      <div class="stat"><div class="v">${maker?esc(maker):'—'}</div><div class="k">maker</div></div>
       <div class="stat"><div class="v">${d.state?esc(d.state):'—'}</div><div class="k">arp</div></div>
     </div>
     ${btns}</div>`;
+}
+function wifiRow(w){
+  const sig=Math.max(0,Math.min(100,w.signal|0));
+  const bars=sig>=75?4:sig>=50?3:sig>=25?2:1;
+  const meta=[w.band||'',w.channel?('ch '+w.channel):'',w.secured?'🔒':'open'].filter(Boolean).join(' · ');
+  return `<div class="wifi-row">
+    <span class="wifi-bars b${bars}" title="${sig}%"><i></i><i></i><i></i><i></i></span>
+    <span class="wifi-ssid">${esc(w.ssid)}</span>
+    <span class="wifi-meta">${esc(meta)}</span>
+    <span class="wifi-sig">${sig}%</span></div>`;
 }
 function renderNetwork(){
   const devs=STATUS.devices||[]; const ns=CONFIG.netscan||{};
   const nnew=devs.filter(d=>d.is_new).length, online=devs.filter(d=>d.online).length;
   const off = ns.enabled===false ? '<span style=color:var(--warn)>Scanning is OFF — enable it in Settings.</span> ' : '';
+  const wifi=STATUS.wifi_nearby||[];
+  let wifiSection='';
+  if(ns.scan_wifi!==false){
+    const body = wifi.length
+      ? `<div class="wifi-list">${wifi.map(wifiRow).join('')}</div>`
+      : '<p class="empty">No nearby Wi-Fi networks listed. Windows Location must be ON to scan — see the Advisor if it is off.</p>';
+    wifiSection=`<h2 class="nsec">Wi-Fi Nearby${wifi.length?` · ${wifi.length}`:''}</h2>
+      <p class="sub">Access points your Wi-Fi radio can see right now, strongest first.</p>${body}`;
+  }
   $('#v-network').innerHTML = `<h1>Network</h1>
     <p class="sub">${off}${devs.length} device${devs.length===1?'':'s'} on your LAN · ${online} online${nnew?` · <span style=color:var(--warn)>${nnew} new</span>`:''}. Trust the ones that are yours — you will be alerted when a new one appears.</p>
-    <div class="grid">${devs.length?devs.map(deviceCard).join(''):'<p class="empty">No devices seen yet — the daemon scans every minute.</p>'}</div>`;
+    <div class="grid">${devs.length?devs.map(deviceCard).join(''):'<p class="empty">No devices seen yet — the daemon scans every minute.</p>'}</div>
+    ${wifiSection}`;
 }
 function renderAdvisor(){
   const adv=STATUS.advice||[];
@@ -415,6 +452,8 @@ function renderSettings(){
     ${toggleRow('Scan the LAN for devices','Discover devices on your network and show them on the Network tab.','netscan.enabled',(c.netscan&&c.netscan.enabled)!==false)}
     ${toggleRow('Alert on new devices','Toast when an untrusted device joins that was not present at startup.','netscan.alert_new_devices',!(c.netscan)||c.netscan.alert_new_devices!==false)}
     ${numRow('Scan interval (s)','How often to sweep the network for devices.','netscan.scan_interval_seconds',(c.netscan&&c.netscan.scan_interval_seconds)||60)}
+    ${toggleRow('List nearby Wi-Fi','Show access points your radio can see on the Network tab. Needs Windows Location on.','netscan.scan_wifi',!(c.netscan)||c.netscan.scan_wifi!==false)}
+    ${numRow('Wi-Fi scan interval (s)','How often to refresh the nearby-Wi-Fi list (heavier than the LAN scan).','netscan.wifi_scan_interval_seconds',(c.netscan&&c.netscan.wifi_scan_interval_seconds)||300)}
     <h2>Setup</h2>
     <div class="row"><div><div class="lbl">Re-run the setup wizard</div><div class="desc">Detect connections, apply Windows fixes, install autostart.</div></div>
       <button data-act="openwizard">Open wizard</button></div>`;

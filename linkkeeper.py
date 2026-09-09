@@ -34,6 +34,7 @@ import advisor
 import commandbus
 import netroute
 import openwifi
+import ouidb
 import store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +56,7 @@ _wifi_bad_cycles = 0                         # consecutive cycles current hotspo
 # LAN device scan (dashboard Network tab + new-device alerts)
 _net_scan: dict = {"last": 0.0, "baseline": None}   # rate-limit ts + first-scan MAC set
 _net_devices: dict = {}                             # mac -> device record
+_wifi_scan: dict = {"last": 0.0, "nets": []}        # nearby-Wi-Fi cache (slower interval)
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +512,7 @@ def maybe_scan_lan(cfg):
         is_known = mac in known
         rec.update({
             "ip": d["ip"], "state": d["state"], "randomized": d["randomized"],
+            "vendor": ouidb.vendor(mac),           # maker name, "" if unknown/randomized
             "last_seen": now, "online": True, "known": is_known,
             "name": (known[mac].get("name") if is_known else rec.get("name", "")),
             "is_new": (not is_known) and (mac not in baseline),
@@ -530,6 +533,26 @@ def _device_snapshot():
         ip = [int(x) for x in r["ip"].split(".")] if r.get("ip") else [0, 0, 0, 0]
         return (0 if r.get("is_new") else 1, 0 if r.get("online") else 1, ip)
     return sorted(_net_devices.values(), key=key)
+
+
+def maybe_scan_wifi(cfg):
+    """Every netscan.wifi_scan_interval_seconds, list nearby Wi-Fi networks for
+    the dashboard's "Wi-Fi Nearby" view. Slower cadence than the LAN scan (a Wi-Fi
+    scan is heavier and the RF picture barely changes minute to minute). Needs
+    Windows Location ON; when it's off the cache clears and the advisor's existing
+    Location-off item explains why. Never raises into the failover loop."""
+    ns = cfg.get("netscan", {})
+    if not ns.get("enabled", True) or not ns.get("scan_wifi", True):
+        return
+    interval = ns.get("wifi_scan_interval_seconds", 300)
+    if time.time() - _wifi_scan["last"] < interval:
+        return
+    _wifi_scan["last"] = time.time()
+    try:
+        _wifi_scan["nets"] = netroute.wlan_scan_all()
+    except Exception as exc:                       # scan must never break failover
+        log.debug("wlan_scan_all failed: %s", exc)
+        _wifi_scan["nets"] = []
 
 
 _last_recovery: dict = {}   # adapter name -> last Restart-NetAdapter attempt
@@ -644,6 +667,7 @@ def write_status(links, chosen, cfg, dry_run, advice=None, devices=None):
         ],
         "history": list(_switch_history),
         "devices": devices or [],
+        "wifi_nearby": _wifi_scan["nets"],
     }
     try:
         os.makedirs(os.path.dirname(STATUS_PATH), exist_ok=True)
@@ -756,6 +780,7 @@ def run_cycle(cfg, dry_run):
     openwifi.tag_links(links)               # mark any joined open net untrusted
     refresh_win_checks(cfg)
     maybe_scan_lan(cfg)
+    maybe_scan_wifi(cfg)
     if not links:
         log.warning("no managed WAN links found (are the phones connected?)")
         advice = advisor.evaluate([], cfg, _last_seen, _unhealthy_since, _win_checks,

@@ -423,5 +423,116 @@ class TestStore(unittest.TestCase):
         self.assertEqual(store.stats()["alerts"], 1)
 
 
+# --------------------------------------------------------------------------- #
+# ouidb — offline MAC -> vendor lookup
+# --------------------------------------------------------------------------- #
+class TestOuiDb(unittest.TestCase):
+    def test_known_vendor_resolves(self):
+        import ouidb
+        # AC-C0-48 is a real OnePlus MA-L assignment; only assert it is non-empty
+        # so the test does not break if the bundled table shortens the name.
+        self.assertTrue(ouidb.vendor("AC-C0-48-11-22-33"))
+
+    def test_prefix_accepts_colons_and_lowercase(self):
+        import ouidb
+        self.assertEqual(ouidb.vendor("ac:c0:48:aa:bb:cc"),
+                         ouidb.vendor("AC-C0-48-00-00-00"))
+
+    def test_randomized_mac_returns_empty(self):
+        import ouidb
+        # DA-.. has the locally-administered bit set -> no registered owner
+        self.assertEqual(ouidb.vendor("DA-A1-19-00-00-00"), "")
+
+    def test_garbage_returns_empty(self):
+        import ouidb
+        self.assertEqual(ouidb.vendor("nonsense"), "")
+        self.assertEqual(ouidb.vendor(""), "")
+
+    def test_table_loaded(self):
+        import ouidb
+        self.assertGreater(ouidb.count(), 1000)   # real registry, not empty
+
+
+# --------------------------------------------------------------------------- #
+# wlan_scan_all — nearby-Wi-Fi parser
+# --------------------------------------------------------------------------- #
+_NETSH_SAMPLE = """
+Interface name : Wi-Fi
+There are 3 networks currently visible.
+
+SSID 1 : HomeNet
+    Network type            : Infrastructure
+    Authentication          : WPA2-Personal
+    Encryption              : CCMP
+    BSSID 1                 : aa:bb:cc:dd:ee:01
+         Signal             : 62%
+         Radio type         : 802.11ac
+         Channel            : 44
+    BSSID 2                 : aa:bb:cc:dd:ee:02
+         Signal             : 88%
+         Radio type         : 802.11ax
+         Channel            : 44
+
+SSID 2 : CafeOpen
+    Network type            : Infrastructure
+    Authentication          : Open
+    Encryption              : None
+    BSSID 1                 : 11:22:33:44:55:66
+         Signal             : 40%
+         Channel            : 6
+
+SSID 3 :
+    Authentication          : WPA3-Personal
+    BSSID 1                 : 99:88:77:66:55:44
+         Signal             : 30%
+         Channel            : 149
+"""
+
+
+class _FakeProc:
+    def __init__(self, out):
+        self.returncode = 0
+        self.stdout = out
+
+
+class TestWlanScanAll(unittest.TestCase):
+    def setUp(self):
+        self._real = netroute._netsh
+        netroute._netsh = lambda *a, **k: _FakeProc(_NETSH_SAMPLE)
+
+    def tearDown(self):
+        netroute._netsh = self._real
+
+    def test_parses_networks_skips_hidden(self):
+        nets = netroute.wlan_scan_all()
+        ssids = [n["ssid"] for n in nets]
+        self.assertIn("HomeNet", ssids)
+        self.assertIn("CafeOpen", ssids)
+        self.assertNotIn("", ssids)               # hidden SSID dropped
+
+    def test_strongest_bssid_and_band(self):
+        home = next(n for n in netroute.wlan_scan_all() if n["ssid"] == "HomeNet")
+        self.assertEqual(home["signal"], 88)      # keeps the stronger BSSID
+        self.assertEqual(home["channel"], 44)
+        self.assertEqual(home["band"], "5 GHz")
+        self.assertTrue(home["secured"])
+
+    def test_open_network_flagged_unsecured(self):
+        cafe = next(n for n in netroute.wlan_scan_all() if n["ssid"] == "CafeOpen")
+        self.assertFalse(cafe["secured"])
+        self.assertEqual(cafe["band"], "2.4 GHz")
+
+    def test_sorted_by_signal(self):
+        sigs = [n["signal"] for n in netroute.wlan_scan_all()]
+        self.assertEqual(sigs, sorted(sigs, reverse=True))
+
+    def test_empty_on_nonzero_exit(self):
+        netroute._netsh = lambda *a, **k: _FakeProc("")
+        # a failed scan (returncode set) -> empty, never raises
+        fp = _FakeProc(""); fp.returncode = 1
+        netroute._netsh = lambda *a, **k: fp
+        self.assertEqual(netroute.wlan_scan_all(), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

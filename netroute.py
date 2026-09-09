@@ -257,6 +257,71 @@ def wlan_scan_open() -> list[dict]:
     return opens
 
 
+def _band_for_channel(ch: int) -> str:
+    """Map a Wi-Fi channel number to its band label. 1-14 = 2.4 GHz; 32-177 =
+    5 GHz; the 6E range (channels up to 233) reads as 6 GHz. '' if unknown."""
+    if 1 <= ch <= 14:
+        return "2.4 GHz"
+    if 32 <= ch <= 177:
+        return "5 GHz"
+    if 178 <= ch <= 233:
+        return "6 GHz"
+    return ""
+
+
+def wlan_scan_all() -> list[dict]:
+    """Scan for ALL nearby Wi-Fi networks (not just open ones) for the Network
+    tab's "Wi-Fi Nearby" view. Returns [{ssid, signal, channel, band, auth,
+    secured}] sorted by signal desc, strongest BSSID per SSID. Needs Windows
+    Location ON (same as any Wi-Fi scan); empty on failure or Location off.
+    Unprivileged — `netsh wlan show networks` reads the last scan cache."""
+    try:
+        proc = _netsh(["wlan", "show", "networks", "mode=bssid"], timeout=25)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    nets: dict[str, dict] = {}
+    cur = None
+    for raw in (proc.stdout or "").splitlines():
+        line = raw.strip()
+        low = line.lower()
+        if line.startswith("SSID ") and ":" in line and not low.startswith("bssid"):
+            name = line.split(":", 1)[1].strip()
+            if not name:                          # skip hidden (empty) SSIDs
+                cur = None
+                continue
+            cur = nets.setdefault(name, {"ssid": name, "auth": "",
+                                         "signal": 0, "channel": 0})
+        elif cur is not None and low.startswith("authentication"):
+            if not cur["auth"]:
+                cur["auth"] = line.split(":", 1)[1].strip()
+        elif cur is not None and low.startswith("signal"):
+            try:                                  # keep the strongest BSSID seen
+                sig = int(line.split(":", 1)[1].strip().rstrip("%"))
+                if sig > cur["signal"]:
+                    cur["signal"] = sig
+            except ValueError:
+                pass
+        elif cur is not None and low.startswith("channel"):
+            try:
+                ch = int(line.split(":", 1)[1].strip())
+                if ch and not cur["channel"]:
+                    cur["channel"] = ch
+            except ValueError:
+                pass
+    out = []
+    for n in nets.values():
+        auth = n["auth"]
+        out.append({
+            "ssid": n["ssid"], "signal": n["signal"], "channel": n["channel"],
+            "band": _band_for_channel(n["channel"]), "auth": auth,
+            "secured": bool(auth) and "open" not in auth.lower(),
+        })
+    out.sort(key=lambda n: -n["signal"])
+    return out
+
+
 _OPEN_PROFILE_XML = """<?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
   <name>{name}</name>
