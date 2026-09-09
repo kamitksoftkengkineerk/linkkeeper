@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import re
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
@@ -99,65 +100,96 @@ def apply_settings(patch: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 PAGE = r"""<!doctype html>
-<html lang="en"><head>
+<html lang="en" class="dark"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LinkKeeper</title>
 <style>
-  /* Warm Rail palette — see C:\Users\User\Desktop\Amit Launchers\Team Status\DESIGN.md.
-     Dark-only per spec (the old light-mode variant is dropped); the blue radial
-     glow is dropped too — spec rule is "no cool blue-greys anywhere". */
-  :root{ --bg:#141413; --bg2:#1c1b19; --card:rgba(255,255,255,.05); --card2:rgba(255,255,255,.08);
-    --stroke:#30302e; --txt:#f2efe9; --dim:#b3ada2; --up:#8fae6c; --down:#c9584c;
-    --pri:#cc785c; --warn:#d4a83a; --acc:#cc785c; }
-  * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.14) transparent; }
+  /* shadcn-admin token system — matches the Soluvae/fleet dashboards (see
+     C:\Users\User\Desktop\Amit Launchers\Team Status\DESIGN.md). System font
+     stack only, no CDN — keeps this dashboard zero-external-dependency /
+     minimum-latency; Inter is used automatically if the OS already has it. */
+  :root{
+    --bg:oklch(12.9% .042 264.695); --card:oklch(14% .04 259.21); --card2:oklch(27.9% .041 260.031);
+    --stroke:oklch(100% 0 0/.1); --txt:oklch(98.4% .003 247.858); --dim:oklch(70.4% .04 256.788);
+    --up:oklch(72% .17 162); --down:oklch(70.4% .191 22.216); --warn:oklch(80% .16 85);
+    --pri:oklch(92.9% .013 255.508); --pri-fg:oklch(20.8% .042 265.755);
+    --radius:.625rem; --sidebar-w:240px; --sidebar-w-collapsed:48px; --header-h:56px;
+  }
+  html.light{
+    --bg:oklch(100% 0 0); --card:oklch(100% 0 0); --card2:oklch(96.8% .007 247.896);
+    --stroke:oklch(92.9% .013 255.508); --txt:oklch(12.9% .042 264.695); --dim:oklch(55.4% .046 257.417);
+    --up:oklch(60% .15 162); --down:oklch(57.7% .245 27.325); --warn:oklch(70% .16 70);
+    --pri:oklch(20.8% .042 265.755); --pri-fg:oklch(98.4% .003 247.858);
+  }
+  * { scrollbar-width: thin; scrollbar-color: color-mix(in oklch, var(--txt) 18%, transparent) transparent; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 8px;
+  ::-webkit-scrollbar-thumb { background: color-mix(in oklch, var(--txt) 18%, transparent); border-radius: 8px;
     border: 2px solid transparent; background-clip: content-box; }
-  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.30); background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in oklch, var(--txt) 32%, transparent); background-clip: content-box; }
   *{box-sizing:border-box} html,body{height:100%}
-  body{margin:0;font:14.5px/1.55 -apple-system,Segoe UI,Roboto,system-ui,sans-serif;color:var(--txt);
-    background:var(--bg);display:flex;min-height:100vh}
+  body{margin:0;overflow:hidden;font:14px/1.55 Inter,ui-sans-serif,system-ui,"Segoe UI",Roboto,Arial,sans-serif;
+    color:var(--txt);background:var(--bg);-webkit-font-smoothing:antialiased}
   a{color:var(--pri);text-decoration:none}
-  /* sidebar */
-  .side{width:230px;flex:0 0 230px;background:linear-gradient(180deg,var(--bg2),transparent);
-    border-right:1px solid var(--stroke);padding:20px 14px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh}
-  .brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:17px;padding:6px 10px 14px}
-  .brand .logo{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--pri),var(--acc));
-    display:grid;place-items:center;font-size:15px}
-  .status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--dim);padding:4px 12px 14px}
-  .status .dot{width:9px;height:9px;border-radius:50%}
-  .nav{display:flex;flex-direction:column;gap:2px}
-  .nav a{display:flex;align-items:center;gap:11px;padding:9px 12px;border-radius:10px;color:var(--dim);font-weight:500}
-  .nav a .ic{width:18px;text-align:center}
-  .nav a:hover{background:var(--card);color:var(--txt)}
-  .nav a.on{background:var(--card2);color:var(--txt)}
-  .nav a .badge{margin-left:auto;background:var(--warn);color:#1a1200;border-radius:20px;font-size:11px;font-weight:700;padding:0 7px;display:none}
-  .side .foot{margin-top:auto;color:var(--dim);font-size:11px;padding:10px 12px}
-  /* main */
-  .main{flex:1;min-width:0;padding:28px 34px 60px;max-width:1000px}
-  h1{font-size:22px;font-weight:650;margin:0 0 3px}
+  /* shell: sidebar + header + scrolling content, shadcn-admin layout */
+  .app{display:flex;height:100vh}
+  .sidebar{width:var(--sidebar-w);min-width:var(--sidebar-w);background:var(--bg);border-right:1px solid var(--stroke);
+    display:flex;flex-direction:column;transition:width .15s ease,min-width .15s ease;overflow:hidden}
+  .sidebar.collapsed{width:var(--sidebar-w-collapsed);min-width:var(--sidebar-w-collapsed)}
+  .brand{display:flex;align-items:center;gap:10px;padding:12px 14px 8px;height:var(--header-h);white-space:nowrap}
+  .brand .logo{width:30px;height:30px;border-radius:8px;background:var(--pri);color:var(--pri-fg);
+    display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:15px}
+  .brand .name{font-weight:600;font-size:14.5px;line-height:1.2}
+  .sidebar.collapsed .brand .name{display:none}
+  .sidebar.collapsed .brand{padding-left:9px}
+  .nav{flex:1;overflow-y:auto;padding:6px 8px;display:flex;flex-direction:column;gap:2px}
+  .nav-group{padding:12px 8px 4px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);white-space:nowrap}
+  .sidebar.collapsed .nav-group{display:none}
+  .nav-item{display:flex;align-items:center;gap:11px;padding:8px 10px;border-radius:calc(var(--radius) - 2px);
+    font-size:14px;font-weight:500;white-space:nowrap;color:var(--dim)}
+  .nav-item .ic{width:18px;text-align:center;flex-shrink:0}
+  .nav-item:hover{background:var(--card2);color:var(--txt)}
+  .nav-item.on{background:var(--card2);color:var(--txt)}
+  .nav-item .badge{margin-left:auto;background:var(--warn);color:var(--pri-fg);border-radius:999px;font-size:11px;
+    font-weight:700;min-width:18px;height:18px;padding:0 6px;display:none;align-items:center;justify-content:center}
+  .sidebar.collapsed .nav-item{justify-content:center;padding:9px 0}
+  .sidebar.collapsed .nav-item span:not(.ic),.sidebar.collapsed .nav-item .badge{display:none}
+  .side-foot{margin-top:auto;color:var(--dim);font-size:11px;padding:10px 14px;white-space:nowrap}
+  .sidebar.collapsed .side-foot{display:none}
+  /* header */
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .header{height:var(--header-h);display:flex;align-items:center;gap:12px;padding:0 16px;border-bottom:1px solid var(--stroke);
+    background:var(--bg);flex-shrink:0}
+  .icon-btn{background:none;border:none;border-radius:calc(var(--radius) - 2px);padding:7px;cursor:pointer;
+    color:var(--txt);display:inline-flex;font-size:15px;line-height:1}
+  .icon-btn:hover{background:var(--card2)}
+  .hdr-status{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
+  .hdr-status .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .content{flex:1;overflow-y:auto;padding:26px 30px 60px}
+  .view-wrap{max-width:1000px;margin:0 auto}
+  h1{font-size:21px;font-weight:650;margin:0 0 3px;letter-spacing:-.01em}
   .sub{color:var(--dim);font-size:13px;margin:0 0 22px}
   h2{font-size:12px;text-transform:uppercase;letter-spacing:.7px;color:var(--dim);margin:30px 0 12px}
   .grid{display:grid;gap:14px;grid-template-columns:repeat(auto-fit,minmax(min(230px,100%),1fr))}
-  .card{background:var(--card);border:1px solid var(--stroke);border-radius:16px;padding:16px 18px;position:relative}
-  .card.primary{border-color:rgba(204,120,92,/*--pri*/ .55);box-shadow:0 0 0 1px rgba(204,120,92,/*--pri*/ .22) inset}
-  .card.untrusted{border-color:rgba(212,168,58,/*--warn*/ .5)}
+  .card{background:var(--card);border:1px solid var(--stroke);border-radius:var(--radius);padding:16px 18px;position:relative}
+  .card.primary{border-color:color-mix(in oklch, var(--pri) 55%, transparent);
+    box-shadow:0 0 0 1px color-mix(in oklch, var(--pri) 22%, transparent) inset}
+  .card.untrusted{border-color:color-mix(in oklch, var(--warn) 50%, transparent)}
   .badgep{position:absolute;top:14px;right:14px;font-size:11px;font-weight:700;color:var(--pri);
-    border:1px solid rgba(204,120,92,/*--pri*/ .5);border-radius:20px;padding:2px 9px}
+    border:1px solid color-mix(in oklch, var(--pri) 50%, transparent);border-radius:999px;padding:2px 9px}
   .name{font-size:16px;font-weight:600;display:flex;align-items:center;gap:9px}
   .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
   .dot.up{background:var(--up);box-shadow:0 0 9px var(--up)} .dot.down{background:var(--down);box-shadow:0 0 9px var(--down)}
   .tag{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);
-    border:1px solid var(--stroke);border-radius:20px;padding:1px 7px;margin-left:auto}
-  .tag.warn{color:var(--warn);border-color:rgba(212,168,58,/*--warn*/ .5)}
+    border:1px solid var(--stroke);border-radius:999px;padding:1px 7px;margin-left:auto}
+  .tag.warn{color:var(--warn);border-color:color-mix(in oklch, var(--warn) 50%, transparent)}
   .alias{color:var(--dim);font-size:12px;margin:3px 0 13px;word-break:break-all}
   .stats{display:flex;gap:16px;margin-bottom:13px} .stat .v{font-size:19px;font-weight:650}
   .stat .k{color:var(--dim);font-size:10.5px;text-transform:uppercase;letter-spacing:.5px}
-  button{font:inherit;color:var(--txt);background:var(--card2);border:1px solid var(--stroke);border-radius:10px;
+  button{font:inherit;color:var(--txt);background:var(--card2);border:1px solid var(--stroke);border-radius:calc(var(--radius) - 2px);
     padding:8px 13px;cursor:pointer;transition:.15s;font-weight:500}
-  button:hover{background:rgba(255,255,255,.16)} button.on{background:var(--pri);border-color:var(--pri);color:#241812}
-  button.primary{background:var(--pri);border-color:var(--pri);color:#241812}
+  button:hover{background:color-mix(in oklch, var(--card2) 70%, var(--txt) 12%)}
+  button.on,button.primary{background:var(--pri);border-color:var(--pri);color:var(--pri-fg)}
   button:disabled{opacity:.5;cursor:default}
   table{width:100%;border-collapse:collapse;font-size:13px}
   td,th{text-align:left;padding:8px 10px;border-bottom:1px solid var(--stroke)} th{color:var(--dim);font-weight:500}
@@ -165,7 +197,7 @@ PAGE = r"""<!doctype html>
   h2.nsec{margin-top:34px}
   .wifi-list{display:flex;flex-direction:column;gap:2px}
   .wifi-row{display:flex;align-items:center;gap:12px;padding:9px 14px;background:var(--card);
-    border:1px solid var(--stroke);border-radius:10px}
+    border:1px solid var(--stroke);border-radius:calc(var(--radius) - 2px)}
   .wifi-ssid{font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .wifi-meta{color:var(--dim);font-size:12px;white-space:nowrap}
   .wifi-sig{color:var(--dim);font-size:12px;width:38px;text-align:right;font-variant-numeric:tabular-nums}
@@ -176,55 +208,71 @@ PAGE = r"""<!doctype html>
   .wifi-bars.b1 i:nth-child(-n+1),.wifi-bars.b2 i:nth-child(-n+2),
   .wifi-bars.b3 i:nth-child(-n+3),.wifi-bars.b4 i:nth-child(-n+4){background:var(--up)}
   .row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:14px 16px;background:var(--card);
-    border:1px solid var(--stroke);border-radius:14px;margin-bottom:10px}
+    border:1px solid var(--stroke);border-radius:var(--radius);margin-bottom:10px}
   .row .lbl{font-weight:600} .row .desc{color:var(--dim);font-size:12.5px;margin-top:2px;max-width:560px}
   /* toggle */
   .sw{position:relative;width:44px;height:25px;flex:0 0 44px}
   .sw input{opacity:0;width:0;height:0} .sw .sl{position:absolute;inset:0;background:var(--card2);border:1px solid var(--stroke);
-    border-radius:20px;transition:.2s;cursor:pointer} .sw .sl:before{content:"";position:absolute;width:19px;height:19px;left:2px;top:2px;
+    border-radius:999px;transition:.2s;cursor:pointer} .sw .sl:before{content:"";position:absolute;width:19px;height:19px;left:2px;top:2px;
     background:var(--dim);border-radius:50%;transition:.2s} .sw input:checked+.sl{background:var(--pri);border-color:var(--pri)}
-  .sw input:checked+.sl:before{transform:translateX(19px);background:#fff}
+  .sw input:checked+.sl:before{transform:translateX(19px);background:var(--pri-fg)}
   input[type=number],input[type=text]{background:var(--card2);border:1px solid var(--stroke);color:var(--txt);
-    border-radius:9px;padding:7px 10px;font:inherit;width:90px}
+    border-radius:calc(var(--radius) - 3px);padding:7px 10px;font:inherit;width:90px}
   /* advice */
-  .adv{background:var(--card);border:1px solid var(--stroke);border-radius:13px;padding:11px 15px;margin-bottom:10px}
-  .adv.crit{border-color:rgba(201,88,76,/*--down*/ .55)} .adv.warn{border-color:rgba(212,168,58,/*--warn*/ .45)}
+  .adv{background:var(--card);border:1px solid var(--stroke);border-radius:calc(var(--radius) + 2px);padding:11px 15px;margin-bottom:10px}
+  .adv.crit{border-color:color-mix(in oklch, var(--down) 55%, transparent)}
+  .adv.warn{border-color:color-mix(in oklch, var(--warn) 45%, transparent)}
   .adv summary{cursor:pointer;font-weight:600;list-style:none} .adv summary::-webkit-details-marker{display:none}
   .adv .why{color:var(--dim);font-size:12.5px;margin:8px 0 2px} .adv ol{margin:6px 0 4px 20px;font-size:13px}
   .adv .sev{margin-right:6px} .adv.crit .sev{color:var(--down)} .adv.warn .sev{color:var(--warn)} .adv.info .sev{color:var(--pri)}
   .hidden{display:none!important}
   /* wizard */
-  .wz{position:fixed;inset:0;background:rgba(6,9,15,.72);backdrop-filter:blur(6px);display:grid;place-items:center;z-index:50;padding:20px}
-  .wzcard{width:min(600px,94vw);background:var(--bg2);border:1px solid var(--stroke);border-radius:20px;padding:28px 30px;max-height:90vh;overflow:auto}
+  .wz{position:fixed;inset:0;background:color-mix(in oklch, var(--bg) 72%, transparent);backdrop-filter:blur(6px);
+    display:grid;place-items:center;z-index:50;padding:20px}
+  .wzcard{width:min(600px,94vw);background:var(--card);border:1px solid var(--stroke);border-radius:calc(var(--radius) + 6px);
+    padding:28px 30px;max-height:90vh;overflow:auto}
   .wzsteps{display:flex;gap:6px;margin-bottom:20px} .wzsteps i{height:4px;flex:1;border-radius:3px;background:var(--card2)}
   .wzsteps i.on{background:var(--pri)}
   .wzcard h3{font-size:20px;margin:0 0 6px} .wzcard p{color:var(--dim);margin:0 0 16px}
   .wzactions{display:flex;justify-content:space-between;margin-top:24px}
-  .pill{display:inline-block;font-size:12px;color:var(--dim);border:1px solid var(--stroke);border-radius:20px;padding:2px 10px;margin:2px 4px 2px 0}
+  .pill{display:inline-block;font-size:12px;color:var(--dim);border:1px solid var(--stroke);border-radius:999px;padding:2px 10px;margin:2px 4px 2px 0}
   .ok{color:var(--up)} .bad{color:var(--down)}
-  @media(max-width:720px){ .side{width:64px;flex-basis:64px} .brand span,.nav a span,.status,.side .foot{display:none} .main{padding:20px} }
+  @media(max-width:900px){ .sidebar{width:var(--sidebar-w-collapsed);min-width:var(--sidebar-w-collapsed)}
+    .brand .name,.nav-group,.nav-item span:not(.ic),.nav-item .badge,.side-foot{display:none} .content{padding:20px} }
 </style></head><body>
-<nav class="side">
-  <div class="brand"><span class="logo">🔗</span><span>LinkKeeper</span></div>
-  <div class="status" id="sideStatus"><span class="dot" style="background:var(--dim)"></span><span>…</span></div>
+<div class="app">
+<aside class="sidebar" id="sidebar">
+  <div class="brand"><div class="logo">🔗</div><div class="name">LinkKeeper</div></div>
   <div class="nav" id="nav">
-    <a href="#dashboard" data-v="dashboard" class="on"><span class="ic">📊</span><span>Dashboard</span></a>
-    <a href="#connections" data-v="connections"><span class="ic">🔌</span><span>Connections</span></a>
-    <a href="#network" data-v="network"><span class="ic">📡</span><span>Network</span><span class="badge" id="netBadge">0</span></a>
-    <a href="#advisor" data-v="advisor"><span class="ic">💡</span><span>Advisor</span><span class="badge" id="advBadge">0</span></a>
-    <a href="#history" data-v="history"><span class="ic">🗂️</span><span>History</span></a>
-    <a href="#settings" data-v="settings"><span class="ic">⚙️</span><span>Settings</span></a>
+    <div class="nav-group">General</div>
+    <a href="#dashboard" data-v="dashboard" class="nav-item on"><span class="ic">📊</span><span>Dashboard</span></a>
+    <a href="#connections" data-v="connections" class="nav-item"><span class="ic">🔌</span><span>Connections</span></a>
+    <a href="#network" data-v="network" class="nav-item"><span class="ic">📡</span><span>Network</span><span class="badge" id="netBadge">0</span></a>
+    <div class="nav-group">Insight</div>
+    <a href="#advisor" data-v="advisor" class="nav-item"><span class="ic">💡</span><span>Advisor</span><span class="badge" id="advBadge">0</span></a>
+    <a href="#history" data-v="history" class="nav-item"><span class="ic">🗂️</span><span>History</span></a>
+    <div class="nav-group">Settings</div>
+    <a href="#settings" data-v="settings" class="nav-item"><span class="ic">⚙️</span><span>Settings</span></a>
   </div>
-  <div class="foot">v1 · localhost only</div>
-</nav>
-<main class="main">
-  <section id="v-dashboard"></section>
-  <section id="v-connections" class="hidden"></section>
-  <section id="v-network" class="hidden"></section>
-  <section id="v-advisor" class="hidden"></section>
-  <section id="v-history" class="hidden"></section>
-  <section id="v-settings" class="hidden"></section>
-</main>
+  <div class="side-foot">v1 · localhost only</div>
+</aside>
+<div class="main">
+  <header class="header">
+    <button class="icon-btn" id="toggle-left" title="Toggle sidebar">☰</button>
+    <div class="hdr-status" id="hdrStatus"><span class="dot" style="background:var(--dim)"></span><span>…</span></div>
+    <button class="icon-btn" id="theme-toggle" title="Toggle theme" style="margin-left:auto">
+      <span id="theme-sun">☀️</span><span id="theme-moon" hidden>🌙</span></button>
+  </header>
+  <div class="content" id="content"><div class="view-wrap">
+    <section id="v-dashboard"></section>
+    <section id="v-connections" class="hidden"></section>
+    <section id="v-network" class="hidden"></section>
+    <section id="v-advisor" class="hidden"></section>
+    <section id="v-history" class="hidden"></section>
+    <section id="v-settings" class="hidden"></section>
+  </div></div>
+</div>
+</div>
 <div id="wizard" class="wz hidden"></div>
 
 <script>
@@ -242,6 +290,40 @@ async function api(path, body, method){
 let STATUS={}, CONFIG={};
 function fmtAge(s){ return s<2?'just now':(s<60?Math.round(s)+'s ago':Math.round(s/60)+'m ago'); }
 
+// ---- theme (shadcn: html.light / default dark), persisted ----
+function applyTheme(t){
+  document.documentElement.classList.toggle('light', t==='light');
+  $('#theme-sun').hidden = (t==='light');
+  $('#theme-moon').hidden = (t!=='light');
+}
+let THEME='dark';
+try{ THEME = localStorage.getItem('lk_theme') || 'dark'; }catch(e){}
+applyTheme(THEME);
+$('#theme-toggle').addEventListener('click', () => {
+  THEME = THEME==='light' ? 'dark' : 'light';
+  try{ localStorage.setItem('lk_theme', THEME); }catch(e){}
+  applyTheme(THEME);
+});
+
+// ---- sidebar collapse, persisted; auto-collapse when narrow ----
+const SIDEBAR_NARROW_PX = 900;
+function applySidebar(){
+  const narrow = window.innerWidth > 0 && window.innerWidth < SIDEBAR_NARROW_PX;
+  let collapsed = false;
+  try{ collapsed = localStorage.getItem('lk_sidebar_collapsed')==='1'; }catch(e){}
+  $('#sidebar').classList.toggle('collapsed', narrow || collapsed);
+}
+$('#toggle-left').addEventListener('click', () => {
+  let collapsed = false;
+  try{
+    collapsed = localStorage.getItem('lk_sidebar_collapsed')==='1';
+    localStorage.setItem('lk_sidebar_collapsed', collapsed?'0':'1');
+  }catch(e){}
+  applySidebar();
+});
+applySidebar();
+window.addEventListener('resize', applySidebar);
+
 // ---- router ----
 const views=['dashboard','connections','network','advisor','history','settings'];
 function route(){
@@ -253,25 +335,48 @@ function route(){
 }
 window.addEventListener('hashchange', route);
 
-// ---- data ----
-async function refresh(){
-  try{ STATUS = await api('/api/status'); }catch(e){}
-  try{ CONFIG = await api('/api/config'); }catch(e){}
-  // sidebar status
+// ---- data: poll every 2.5s (always-on safety net) + SSE for sub-second updates ----
+function updateHeaderStatus(){
   const age = STATUS.updated_epoch ? (Date.now()/1000 - STATUS.updated_epoch) : 999;
   const online = (STATUS.links||[]).some(l=>l.healthy);
-  const sd=$('#sideStatus'); const stale = age>15;
-  sd.innerHTML = `<span class="dot" style="background:${online&&!stale?'var(--up)':'var(--down)'}"></span>`+
-    `<span>${!STATUS.updated?'daemon offline':online?(stale?'stalled?':'online'):'OFFLINE'}</span>`;
+  const hs=$('#hdrStatus'); const stale = age>15;
+  hs.innerHTML = `<span class="dot" style="background:${online&&!stale?'var(--up)':'var(--down)'}"></span>`+
+    `<span>${!STATUS.updated?'daemon offline':online?(stale?'stalled?':'online'):'OFFLINE'} · updated ${fmtAge(age)}</span>`;
+}
+function afterDataUpdate(){
+  updateHeaderStatus();
   const adv=(STATUS.advice||[]).filter(a=>a.severity!=='info').length;
-  const b=$('#advBadge'); b.style.display=adv?'inline-block':'none'; b.textContent=adv;
+  const b=$('#advBadge'); b.style.display=adv?'flex':'none'; b.textContent=adv;
   const nnew=(STATUS.devices||[]).filter(d=>d.is_new).length;
-  const nb=$('#netBadge'); if(nb){ nb.style.display=nnew?'inline-block':'none'; nb.textContent=nnew; }
+  const nb=$('#netBadge'); if(nb){ nb.style.display=nnew?'flex':'none'; nb.textContent=nnew; }
   // first-run wizard
   if(CONFIG.ui && CONFIG.ui.wizard_completed===false && $('#wizard').classList.contains('hidden')) openWizard();
   render();
 }
-setInterval(refresh, 2500);
+async function refresh(){
+  try{ STATUS = await api('/api/status'); }catch(e){}
+  try{ CONFIG = await api('/api/config'); }catch(e){}
+  afterDataUpdate();
+}
+setInterval(refresh, 2500);            // fallback poll — keeps working even if SSE is unavailable
+setInterval(updateHeaderStatus, 1000); // ticks "updated Xs ago" between data refreshes
+
+function startStream(){
+  if(typeof EventSource === 'undefined') return;   // no SSE support -> poll-only, silently
+  try{
+    const es = new EventSource('/api/stream');
+    es.onmessage = e => {
+      try{
+        const d = JSON.parse(e.data);
+        if(d.status) STATUS = d.status;
+        if(d.config) CONFIG = d.config;
+        afterDataUpdate();
+      }catch(err){}
+    };
+    // no onerror handling needed — EventSource auto-reconnects, and the 2.5s
+    // poll above keeps the UI correct regardless.
+  }catch(e){}
+}
 
 // ---- renderers ----
 function linkCard(l){
@@ -573,7 +678,7 @@ async function wzInstall(){ const b=$('#wzInstall'); b.disabled=true; b.textCont
   b.textContent=r.ok?'✓ Installed':'Retry'; b.disabled=false; if(r.ok) setTimeout(()=>{WZ++;drawWizard();},800); }
 async function finishWizard(){ await api('/api/config',{'ui.wizard_completed':true}); closeWizard(); refresh(); }
 
-route(); refresh();
+route(); refresh(); startStream();
 </script></body></html>"""
 
 
@@ -628,8 +733,56 @@ class Handler(BaseHTTPRequestHandler):
             # Always valid JSON: `null` while pending (a 204 with an empty body
             # made the browser's r.json() throw and hung the poll loop).
             self._send(200, json.dumps(commandbus.result(cid)))
+        elif path.startswith("/api/stream"):
+            self._stream_status()
         else:
             self._send(404, json.dumps({"error": "not found"}))
+
+    def _stream_status(self):
+        """Server-Sent Events: push a fresh {status, config} snapshot the moment
+        status.json or config.json changes on disk (the daemon writes both
+        atomically), instead of making the browser poll. Runs on this
+        connection's own thread (ThreadingHTTPServer) so it never blocks other
+        requests; exits cleanly the instant the browser tab closes or navigates
+        away (write fails -> caught below), which is when EventSource drops the
+        connection. Client falls back to (and always keeps) its 2.5s poll, so a
+        client without EventSource support, or a stream that silently stalls,
+        still stays correct — this only shaves the typical latency down."""
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            return
+        last_status_mtime = last_config_mtime = None
+        last_sent = 0.0
+        try:
+            while True:
+                try:
+                    smtime = os.path.getmtime(STATUS_PATH)
+                except OSError:
+                    smtime = None
+                try:
+                    cmtime = os.path.getmtime(CONFIG_PATH)
+                except OSError:
+                    cmtime = None
+                changed = smtime != last_status_mtime or cmtime != last_config_mtime
+                now = time.time()
+                if changed:
+                    last_status_mtime, last_config_mtime = smtime, cmtime
+                    payload = json.dumps({"status": read_status(), "config": read_config()})
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    last_sent = now
+                elif now - last_sent > 15:            # heartbeat keeps idle connections alive
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    last_sent = now
+                time.sleep(0.3)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            pass  # client disconnected — normal, not an error
 
     def do_POST(self):
         if not self._local_only():
