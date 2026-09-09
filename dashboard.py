@@ -499,17 +499,19 @@ function renderAdvisor(){
     </details>`).join(''):'<p class="empty">All good — no issues detected.</p>'}`;
 }
 function tsStr(ts){ try{ return new Date(ts*1000).toLocaleString(); }catch(e){ return ''; } }
-function sparkline(ser, label){
-  ser=(ser||[]).filter(p=>p.latency_ms!=null);
+function sparkline(res, label){
+  const ser=((res&&res.points)||[]).filter(p=>p.latency_ms!=null);
   if(ser.length<2) return '';
   const W=600,H=80,pad=6, lat=ser.map(p=>p.latency_ms);
   const max=Math.max(...lat), min=Math.min(...lat), rng=(max-min)||1, step=(W-2*pad)/(ser.length-1);
   const pts=ser.map((p,i)=>`${(pad+i*step).toFixed(1)},${(H-pad-(p.latency_ms-min)/rng*(H-2*pad)).toFixed(1)}`).join(' ');
-  return `<h2>Latency — ${esc(label)}</h2>
+  const raw=(res&&res.raw_count)||ser.length, hrs=res&&res.window_hours;
+  const capNote = raw>ser.length ? ` (averaged from ${raw} samples)` : '';
+  return `<h2>Latency — ${esc(label)}${hrs?` · last ${hrs}h`:''}</h2>
     <div class="card" style="padding:8px">
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:80px;display:block">
         <polyline points="${pts}" fill="none" stroke="var(--up)" stroke-width="1.5"/></svg></div>
-    <p class="sub">${ser.length} samples · ${min.toFixed(0)}–${max.toFixed(0)} ms</p>`;
+    <p class="sub">${ser.length} points${capNote} · ${min.toFixed(0)}–${max.toFixed(0)} ms</p>`;
 }
 let histData=null, histSeries=null;
 let histOpen={devices:true, activity:false, switches:false, outages:false};
@@ -724,7 +726,17 @@ class Handler(BaseHTTPRequestHandler):
             }))
         elif path.startswith("/api/series/"):
             link = unquote(path.split("/api/series/", 1)[1])
-            self._send(200, json.dumps(store.link_series(link)))
+            # Bounded by TIME (recent trend), not raw row count — a row-count cap
+            # silently shrinks/grows with the probe interval. Then downsampled to
+            # a fixed point budget so the chart never plots more points than it
+            # has pixels for (was drawing every raw sample, which just painted
+            # over itself and looked like solid fill at a few thousand rows).
+            window_hours = 6
+            raw = store.link_series(link, since=time.time() - window_hours * 3600, limit=20000)
+            points = store.downsample_series(raw, buckets=180)
+            self._send(200, json.dumps({
+                "points": points, "raw_count": len(raw), "window_hours": window_hours,
+            }))
         elif path.startswith("/api/device/"):
             mac = unquote(path.split("/api/device/", 1)[1])
             self._send(200, json.dumps(store.device_timeline(mac)))

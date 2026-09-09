@@ -277,6 +277,35 @@ def link_series(link, since=None, limit=3000):
         return []
 
 
+def downsample_series(rows, buckets=180):
+    """Collapse a time-ordered list of {ts, latency_ms, loss_pct, healthy} rows
+    into at most `buckets` points, averaging latency/loss within equal-width
+    buckets across the row range (rows already fewer than `buckets` pass
+    through unchanged). Keeps a chart from ever plotting more points than it
+    has pixels for — a raw multi-thousand-sample series drawn 1:1 into a
+    ~600px-wide sparkline just draws over itself and reads as solid fill."""
+    n = len(rows)
+    if n <= buckets or buckets <= 0:
+        return list(rows)
+    out = []
+    bucket_size = n / buckets
+    for i in range(buckets):
+        lo, hi = int(i * bucket_size), int((i + 1) * bucket_size)
+        if hi <= lo:
+            hi = lo + 1
+        chunk = rows[lo:hi]
+        if not chunk:
+            continue
+        lats = [r["latency_ms"] for r in chunk if r.get("latency_ms") is not None]
+        out.append({
+            "ts": chunk[len(chunk) // 2]["ts"],   # representative timestamp (middle of the bucket)
+            "latency_ms": (sum(lats) / len(lats)) if lats else None,
+            "loss_pct": sum(r.get("loss_pct") or 0 for r in chunk) / len(chunk),
+            "healthy": any(r.get("healthy") for r in chunk),
+        })
+    return out
+
+
 def switches(limit=100):
     try:
         con = _reader()

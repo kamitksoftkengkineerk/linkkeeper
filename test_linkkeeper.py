@@ -423,6 +423,51 @@ class TestStore(unittest.TestCase):
         self.assertEqual(store.stats()["alerts"], 1)
 
 
+class TestDownsampleSeries(unittest.TestCase):
+    def _rows(self, n, latency=lambda i: float(i)):
+        return [{"ts": i, "latency_ms": latency(i), "loss_pct": 0, "healthy": True}
+                for i in range(n)]
+
+    def test_short_series_passes_through_unchanged(self):
+        rows = self._rows(50)
+        self.assertEqual(store.downsample_series(rows, buckets=180), rows)
+
+    def test_long_series_capped_at_bucket_count(self):
+        rows = self._rows(1663)
+        out = store.downsample_series(rows, buckets=180)
+        self.assertEqual(len(out), 180)   # this is the exact regression: was 1663 raw points
+
+    def test_bucket_averages_latency(self):
+        # 10 rows, 2 buckets -> first bucket averages 0..4 (=2.0), second 5..9 (=7.0)
+        rows = self._rows(10)
+        out = store.downsample_series(rows, buckets=2)
+        self.assertAlmostEqual(out[0]["latency_ms"], 2.0)
+        self.assertAlmostEqual(out[1]["latency_ms"], 7.0)
+
+    def test_preserves_chronological_order(self):
+        rows = self._rows(500)
+        out = store.downsample_series(rows, buckets=50)
+        tss = [p["ts"] for p in out]
+        self.assertEqual(tss, sorted(tss))
+
+    def test_none_latency_excluded_from_average(self):
+        rows = self._rows(6, latency=lambda i: None if i < 3 else 10.0)
+        out = store.downsample_series(rows, buckets=1)
+        self.assertEqual(out[0]["latency_ms"], 10.0)   # only the non-None samples count
+
+    def test_all_none_latency_bucket_is_none(self):
+        rows = self._rows(4, latency=lambda i: None)
+        out = store.downsample_series(rows, buckets=1)
+        self.assertIsNone(out[0]["latency_ms"])
+
+    def test_empty_input(self):
+        self.assertEqual(store.downsample_series([], buckets=180), [])
+
+    def test_zero_buckets_returns_input_unchanged(self):
+        rows = self._rows(300)
+        self.assertEqual(store.downsample_series(rows, buckets=0), rows)
+
+
 # --------------------------------------------------------------------------- #
 # ouidb — offline MAC -> vendor lookup
 # --------------------------------------------------------------------------- #
