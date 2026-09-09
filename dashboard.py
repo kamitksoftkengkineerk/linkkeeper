@@ -18,8 +18,10 @@ import json
 import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 import commandbus
+import store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -36,6 +38,8 @@ ALLOWED_SETTINGS = {
     "wifi.open_join.blocklist",
     "notify.enabled", "advisor.enabled", "speedtest.enabled",
     "manual_pin", "ui.theme", "ui.wizard_completed",
+    "netscan.enabled", "netscan.alert_new_devices",
+    "netscan.scan_interval_seconds", "netscan.known", "netscan.ignore",
 }
 
 
@@ -191,7 +195,9 @@ PAGE = r"""<!doctype html>
   <div class="nav" id="nav">
     <a href="#dashboard" data-v="dashboard" class="on"><span class="ic">📊</span><span>Dashboard</span></a>
     <a href="#connections" data-v="connections"><span class="ic">🔌</span><span>Connections</span></a>
+    <a href="#network" data-v="network"><span class="ic">📡</span><span>Network</span><span class="badge" id="netBadge">0</span></a>
     <a href="#advisor" data-v="advisor"><span class="ic">💡</span><span>Advisor</span><span class="badge" id="advBadge">0</span></a>
+    <a href="#history" data-v="history"><span class="ic">🗂️</span><span>History</span></a>
     <a href="#settings" data-v="settings"><span class="ic">⚙️</span><span>Settings</span></a>
   </div>
   <div class="foot">v1 · localhost only</div>
@@ -199,7 +205,9 @@ PAGE = r"""<!doctype html>
 <main class="main">
   <section id="v-dashboard"></section>
   <section id="v-connections" class="hidden"></section>
+  <section id="v-network" class="hidden"></section>
   <section id="v-advisor" class="hidden"></section>
+  <section id="v-history" class="hidden"></section>
   <section id="v-settings" class="hidden"></section>
 </main>
 <div id="wizard" class="wz hidden"></div>
@@ -220,7 +228,7 @@ let STATUS={}, CONFIG={};
 function fmtAge(s){ return s<2?'just now':(s<60?Math.round(s)+'s ago':Math.round(s/60)+'m ago'); }
 
 // ---- router ----
-const views=['dashboard','connections','advisor','settings'];
+const views=['dashboard','connections','network','advisor','history','settings'];
 function route(){
   let v=(location.hash||'#dashboard').slice(1);
   if(!views.includes(v)) v='dashboard';
@@ -242,6 +250,8 @@ async function refresh(){
     `<span>${!STATUS.updated?'daemon offline':online?(stale?'stalled?':'online'):'OFFLINE'}</span>`;
   const adv=(STATUS.advice||[]).filter(a=>a.severity!=='info').length;
   const b=$('#advBadge'); b.style.display=adv?'inline-block':'none'; b.textContent=adv;
+  const nnew=(STATUS.devices||[]).filter(d=>d.is_new).length;
+  const nb=$('#netBadge'); if(nb){ nb.style.display=nnew?'inline-block':'none'; nb.textContent=nnew; }
   // first-run wizard
   if(CONFIG.ui && CONFIG.ui.wizard_completed===false && $('#wizard').classList.contains('hidden')) openWizard();
   render();
@@ -270,7 +280,9 @@ function render(){
   const v=(location.hash||'#dashboard').slice(1);
   if(v==='dashboard') renderDash();
   else if(v==='connections') renderConns();
+  else if(v==='network') renderNetwork();
   else if(v==='advisor') renderAdvisor();
+  else if(v==='history') renderHistory();
   else if(v==='settings') renderSettings();
 }
 function renderDash(){
@@ -291,6 +303,33 @@ function renderConns(){
     <p class="sub">Every link LinkKeeper is monitoring right now, best first.</p>
     <div class="grid">${links.length?links.map(linkCard).join(''):'<p class="empty">Nothing connected.</p>'}</div>`;
 }
+function deviceCard(d){
+  const knownMacs=((CONFIG.netscan&&CONFIG.netscan.known)||[]).map(k=>String(k.mac||'').toUpperCase());
+  const known = d.known || knownMacs.includes(d.mac);   // reflect a fresh Trust before the next daemon scan
+  const isnew = d.is_new && !known;
+  const tag = known?'trusted' : (isnew?'NEW' : (d.randomized?'randomized':'seen'));
+  const title = esc(d.name || d.ip || d.mac);
+  const btns = known
+    ? `<button data-name="${esc(d.mac)}">Rename</button>`
+    : `<button class="on" data-trust="${esc(d.mac)}">Trust</button><button data-name="${esc(d.mac)}">Name</button>`;
+  return `<div class="card ${isnew?'untrusted':''}">
+    <div class="name"><span class="dot ${d.online?'up':'down'}"></span>${title}
+      <span class="tag ${isnew?'warn':''}">${tag}</span></div>
+    <div class="alias">${esc(d.ip||'—')} · ${esc(d.mac)}${d.randomized?' · randomized MAC':''}</div>
+    <div class="stats">
+      <div class="stat"><div class="v">${d.online?'online':'offline'}</div><div class="k">status</div></div>
+      <div class="stat"><div class="v">${d.state?esc(d.state):'—'}</div><div class="k">arp</div></div>
+    </div>
+    ${btns}</div>`;
+}
+function renderNetwork(){
+  const devs=STATUS.devices||[]; const ns=CONFIG.netscan||{};
+  const nnew=devs.filter(d=>d.is_new).length, online=devs.filter(d=>d.online).length;
+  const off = ns.enabled===false ? '<span style=color:var(--warn)>Scanning is OFF — enable it in Settings.</span> ' : '';
+  $('#v-network').innerHTML = `<h1>Network</h1>
+    <p class="sub">${off}${devs.length} device${devs.length===1?'':'s'} on your LAN · ${online} online${nnew?` · <span style=color:var(--warn)>${nnew} new</span>`:''}. Trust the ones that are yours — you will be alerted when a new one appears.</p>
+    <div class="grid">${devs.length?devs.map(deviceCard).join(''):'<p class="empty">No devices seen yet — the daemon scans every minute.</p>'}</div>`;
+}
 function renderAdvisor(){
   const adv=STATUS.advice||[];
   $('#v-advisor').innerHTML = `<h1>Advisor</h1>
@@ -299,6 +338,57 @@ function renderAdvisor(){
       <summary><span class="sev">${a.severity==='crit'?'✖':a.severity==='warn'?'⚠':'ℹ'}</span>${esc(a.title)}</summary>
       <div class="why">${esc(a.why)}</div><ol>${a.steps.map(s=>`<li>${esc(s)}</li>`).join('')}</ol>
     </details>`).join(''):'<p class="empty">All good — no issues detected.</p>'}`;
+}
+function tsStr(ts){ try{ return new Date(ts*1000).toLocaleString(); }catch(e){ return ''; } }
+function sparkline(ser, label){
+  ser=(ser||[]).filter(p=>p.latency_ms!=null);
+  if(ser.length<2) return '';
+  const W=600,H=80,pad=6, lat=ser.map(p=>p.latency_ms);
+  const max=Math.max(...lat), min=Math.min(...lat), rng=(max-min)||1, step=(W-2*pad)/(ser.length-1);
+  const pts=ser.map((p,i)=>`${(pad+i*step).toFixed(1)},${(H-pad-(p.latency_ms-min)/rng*(H-2*pad)).toFixed(1)}`).join(' ');
+  return `<h2>Latency — ${esc(label)}</h2>
+    <div class="card" style="padding:8px">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:80px;display:block">
+        <polyline points="${pts}" fill="none" stroke="var(--up)" stroke-width="1.5"/></svg></div>
+    <p class="sub">${ser.length} samples · ${min.toFixed(0)}–${max.toFixed(0)} ms</p>`;
+}
+let histData=null, histSeries=null;
+let histOpen={devices:true, activity:false, switches:false, outages:false};
+async function renderHistory(){
+  const el=$('#v-history');
+  if(!histData && !el.querySelector('h1')) el.innerHTML='<h1>History</h1><p class="empty">loading…</p>';
+  histData=await api('/api/history');
+  histSeries=STATUS.primary ? await api('/api/series/'+encodeURIComponent(STATUS.primary)) : null;
+  drawHistory();
+}
+function toggleHist(k){
+  if(k==='all-expand'){ for(const x in histOpen) histOpen[x]=true; }
+  else if(k==='all-collapse'){ for(const x in histOpen) histOpen[x]=false; }
+  else if(k in histOpen){ histOpen[k]=!histOpen[k]; }
+  drawHistory();
+}
+function hsec(key,title,cnt,inner){
+  const open=histOpen[key];
+  return `<h2 data-hist="${key}" style="cursor:pointer;user-select:none">${open?'▾':'▸'} ${esc(title)} <span style="color:var(--dim);font-weight:400;font-size:13px">(${cnt})</span></h2>${open?inner:''}`;
+}
+function drawHistory(){
+  const el=$('#v-history'), h=histData;
+  if(!h){ el.innerHTML='<h1>History</h1><p class="empty">No records yet — the daemon fills this over time.</p>'; return; }
+  const st=h.stats||{}, mb=((st.db_bytes||0)/1048576).toFixed(1), now=Date.now()/1000;
+  const chart=STATUS.primary?sparkline(histSeries, STATUS.primary):'';
+  const dv=(h.devices||[]).map(d=>`<tr><td>${esc(d.name||d.mac)}</td><td>${esc(d.last_ip||'')}</td><td>${fmtAge(now-(d.last_seen||now))}</td><td>${esc(tsStr(d.first_seen))}</td><td>${d.trusted?'✓':''}${d.randomized?' 🎲':''}</td></tr>`).join('');
+  const ev=(h.events||[]).slice(0,80).map(e=>`<tr><td>${esc(tsStr(e.ts))}</td><td>${esc(e.mac)}</td><td><span class="tag ${e.event==='new'?'warn':''}">${esc(e.event)}</span></td><td>${esc(e.ip||'')}</td></tr>`).join('');
+  const sw=(h.switches||[]).slice(0,40).map(s=>`<tr><td>${esc(tsStr(s.ts))}</td><td>${esc(s.from_link)} → ${esc(s.to_link)}</td><td>${s.latency_ms==null?'':s.latency_ms+' ms'}</td><td>${esc(s.reason||'')}</td></tr>`).join('');
+  const out=(h.outages||[]).slice(0,25).map(o=>`<tr><td>${esc(tsStr(o.started))}</td><td>${o.ended?esc(tsStr(o.ended)):'ongoing'}</td><td>${o.duration_s?Math.round(o.duration_s)+' s':''}</td></tr>`).join('');
+  const tbl=(head,body,cols,empty)=>`<table><thead><tr>${head}</tr></thead><tbody>${body||`<tr><td colspan=${cols} class=empty>${empty}</td></tr>`}</tbody></table>`;
+  el.innerHTML=`<h1>History</h1>
+    <p class="sub">Local SQLite records · ${st.devices||0} devices · ${st.events||0} events · ${st.switches||0} switches · ${st.samples||0} samples · ${mb} MB · <span style="color:var(--up)">updated ${new Date().toLocaleTimeString()}</span></p>
+    <div style="margin:6px 0 4px"><button class="sm" data-hist="all-expand">Expand all</button> <button class="sm" data-hist="all-collapse">Collapse all</button></div>
+    ${chart}
+    ${hsec('devices','Devices — last seen',(h.devices||[]).length, tbl('<th>Device</th><th>IP</th><th>Last seen</th><th>First seen</th><th>Trusted</th>', dv, 5, 'none yet'))}
+    ${hsec('activity','Activity log',(h.events||[]).length, tbl('<th>When</th><th>Device</th><th>Event</th><th>IP</th>', ev, 4, 'none yet'))}
+    ${hsec('switches','Connection switches',(h.switches||[]).length, tbl('<th>When</th><th>Change</th><th>Latency</th><th>Type</th>', sw, 4, 'none yet'))}
+    ${hsec('outages','Outages',(h.outages||[]).length, tbl('<th>Started</th><th>Ended</th><th>Duration</th>', out, 3, 'none — never fully offline'))}`;
 }
 function toggleRow(label, desc, path, checked){
   return `<div class="row"><div><div class="lbl">${label}</div><div class="desc">${desc}</div></div>
@@ -321,6 +411,10 @@ function renderSettings(){
     ${numRow('Open Wi-Fi min signal (%)','Ignore weak open networks below this.','wifi.open_join.min_signal_pct',oj.min_signal_pct||55)}
     <h2>Notifications</h2>
     ${toggleRow('Desktop toasts','Pop a notification on every link switch / new issue.','notify.enabled',c.notify.enabled)}
+    <h2>Network scan</h2>
+    ${toggleRow('Scan the LAN for devices','Discover devices on your network and show them on the Network tab.','netscan.enabled',(c.netscan&&c.netscan.enabled)!==false)}
+    ${toggleRow('Alert on new devices','Toast when an untrusted device joins that was not present at startup.','netscan.alert_new_devices',!(c.netscan)||c.netscan.alert_new_devices!==false)}
+    ${numRow('Scan interval (s)','How often to sweep the network for devices.','netscan.scan_interval_seconds',(c.netscan&&c.netscan.scan_interval_seconds)||60)}
     <h2>Setup</h2>
     <div class="row"><div><div class="lbl">Re-run the setup wizard</div><div class="desc">Detect connections, apply Windows fixes, install autostart.</div></div>
       <button data-act="openwizard">Open wizard</button></div>`;
@@ -329,6 +423,20 @@ function renderSettings(){
 // ---- actions ----
 async function pin(name, pinned){ await api('/api/pin',{name:pinned?null:name}); refresh(); }
 async function setCfg(path, value){ await api('/api/config',{[path]:value}); await refresh(); }
+function knownList(){ return ((CONFIG.netscan&&CONFIG.netscan.known)||[]).map(k=>Object.assign({},k)); }
+async function trustDevice(mac){
+  const dev=(STATUS.devices||[]).find(d=>d.mac===mac); const known=knownList();
+  if(known.some(k=>String(k.mac||'').toUpperCase()===mac)) return;
+  known.push({mac:mac, name:(dev&&dev.name)||'', trusted:true});
+  await setCfg('netscan.known', known);
+}
+async function nameDevice(mac){
+  const dev=(STATUS.devices||[]).find(d=>d.mac===mac);
+  const nm=prompt('Name this device:', (dev&&dev.name)||''); if(nm===null) return;
+  const known=knownList(); const i=known.findIndex(k=>String(k.mac||'').toUpperCase()===mac);
+  if(i>=0){ known[i].name=nm; known[i].trusted=true; } else { known.push({mac:mac, name:nm, trusted:true}); }
+  await setCfg('netscan.known', known);
+}
 async function runCommand(action, args){
   const {id}=await api('/api/command',{action,args:args||{}});
   for(let i=0;i<40;i++){ await new Promise(r=>setTimeout(r,500));
@@ -391,6 +499,9 @@ function doAct(a){
 }
 document.addEventListener('click', e=>{
   const p=e.target.closest('[data-pin]'); if(p){ pin(p.dataset.pin, p.dataset.pinned==='true'); return; }
+  const t=e.target.closest('[data-trust]'); if(t){ trustDevice(t.dataset.trust); return; }
+  const nm=e.target.closest('[data-name]'); if(nm){ nameDevice(nm.dataset.name); return; }
+  const hs=e.target.closest('[data-hist]'); if(hs){ toggleHist(hs.dataset.hist); return; }
   const a=e.target.closest('[data-act]'); if(a){ e.preventDefault(); doAct(a.dataset.act); }
 });
 document.addEventListener('change', e=>{
@@ -418,6 +529,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")   # always serve fresh (local dashboard)
         self.end_headers()
         self.wfile.write(data)
 
@@ -432,14 +544,29 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def do_GET(self):
-        if self.path == "/" or self.path.startswith("/index"):
+        path = self.path.split("?", 1)[0]          # ignore query string (cache-busters etc.)
+        if path == "/" or path.startswith("/index"):
             self._send(200, PAGE, "text/html; charset=utf-8")
-        elif self.path.startswith("/api/status"):
+        elif path.startswith("/api/status"):
             self._send(200, json.dumps(read_status()))
-        elif self.path.startswith("/api/config"):
+        elif path.startswith("/api/config"):
             self._send(200, json.dumps(read_config()))
-        elif self.path.startswith("/api/command/"):
-            cid = self.path.rsplit("/", 1)[-1]
+        elif path.startswith("/api/history"):
+            self._send(200, json.dumps({
+                "devices": store.all_devices(300),
+                "events": store.recent_events(200),
+                "switches": store.switches(100),
+                "outages": store.outage_log(50),
+                "stats": store.stats(),
+            }))
+        elif path.startswith("/api/series/"):
+            link = unquote(path.split("/api/series/", 1)[1])
+            self._send(200, json.dumps(store.link_series(link)))
+        elif path.startswith("/api/device/"):
+            mac = unquote(path.split("/api/device/", 1)[1])
+            self._send(200, json.dumps(store.device_timeline(mac)))
+        elif path.startswith("/api/command/"):
+            cid = path.rsplit("/", 1)[-1]
             # Always valid JSON: `null` while pending (a 204 with an empty body
             # made the browser's r.json() throw and hung the poll loop).
             self._send(200, json.dumps(commandbus.result(cid)))

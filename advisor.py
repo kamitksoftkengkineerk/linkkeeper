@@ -176,7 +176,7 @@ def _advice(aid, severity, title, steps, why):
             "steps": list(steps), "why": why}
 
 
-def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None):
+def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None, devices=None):
     """Return the list of currently-active advice items."""
     now = now or time.time()
     adv_cfg = cfg.get("advisor", {})
@@ -284,6 +284,23 @@ def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None):
              "(only needed to discover NEW open networks; your saved hotspots don't need it)"],
             "Windows blocks Wi-Fi network scanning unless Location services are enabled.",
         ))
+
+    # --- new device on the LAN (intruder alert) ---
+    ns = cfg.get("netscan", {})
+    if ns.get("enabled", True) and ns.get("alert_new_devices", True) and devices:
+        for d in devices:
+            if not d.get("is_new"):
+                continue
+            label = d.get("name") or d.get("ip") or d.get("mac")
+            rnd = " (randomized MAC — likely a phone)" if d.get("randomized") else ""
+            advice.append(_advice(
+                f"intruder:{d['mac']}", "warn",
+                f"New device on your network: {label}",
+                ["Open the Network tab (dashboard :8901) to see it",
+                 "If it's yours, click Trust to silence this and give it a name",
+                 "If you don't recognise it, check who's on your Wi-Fi and change the password"],
+                f"A device ({d.get('ip', '?')} · {d['mac']}{rnd}) joined that wasn't present when LinkKeeper started and isn't in your trusted list.",
+            ))
 
     return advice
 

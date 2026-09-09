@@ -69,6 +69,7 @@
     },
     "_comment": "One Wi-Fi radio = one hotspot at a time. If not on any SSID in this priority list, LinkKeeper connects to the first available (once per retry_seconds)."
   },
+  "netscan": { "enabled": true, "scan_interval_seconds": 60, "alert_new_devices": true, "sample_link_quality": true, "sample_interval_seconds": 0, "db_retention_days": 0, "known": [], "ignore": [], "_comment": "LAN device map + new-device alerts (dashboard Network tab). Ping-sweeps the local /24 + reads the ARP table (no elevation) every scan_interval_seconds; toasts + flags any MAC not in 'known'. Devices present at daemon start are auto-baselined. Trust from the dashboard to add to 'known'. Phones randomize Wi-Fi MACs, so a returning phone can look new until trusted." },
   "ui": { "wizard_completed": false, "theme": "auto", "_comment": "wizard_completed:false triggers the first-run setup wizard." },
   "notify": { "enabled": true, "_comment": "Windows toast on every primary switch." },
   "speedtest": { "enabled": false, "interval_seconds": 3600, "url": "https://speed.cloudflare.com/__down?bytes=2000000", "note": "OFF by default. Ranks links by measured speed when on (uses data)." },

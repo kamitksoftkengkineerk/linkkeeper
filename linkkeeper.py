@@ -34,6 +34,7 @@ import advisor
 import commandbus
 import netroute
 import openwifi
+import store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(HERE, "config.json")
@@ -50,6 +51,10 @@ _unhealthy_since: dict = {}                  # link name -> since when unhealthy
 _win_checks: dict = {"ts": 0.0}              # cached Windows power-setting checks
 _advice_toasted: dict = {}                   # advice id -> last toast time
 _wifi_bad_cycles = 0                         # consecutive cycles current hotspot had no internet
+
+# LAN device scan (dashboard Network tab + new-device alerts)
+_net_scan: dict = {"last": 0.0, "baseline": None}   # rate-limit ts + first-scan MAC set
+_net_devices: dict = {}                             # mac -> device record
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +415,8 @@ def apply_choice(chosen, links, cfg, dry_run):
             "to": chosen.name,
             "latency_ms": round(chosen.latency_ms, 1),
         })
+        store.record_switch(prev or "-", chosen.name, round(chosen.latency_ms, 1),
+                            "wired" if chosen.wired else "wireless")
         log.info("PRIMARY -> %s (%.0f ms, jitter %.0f, loss %.0f%%)",
                  chosen.name, chosen.latency_ms, chosen.jitter_ms,
                  _states[chosen.name].loss_pct)
@@ -468,6 +475,61 @@ def refresh_win_checks(cfg):
     log.debug("win checks: usb_suspend=%s fast_startup=%s hubs=%d",
               _win_checks.get("usb_suspend"), _win_checks.get("fast_startup"),
               len(_win_checks.get("hubs_sleepy") or []))
+
+
+def maybe_scan_lan(cfg):
+    """Every netscan.scan_interval_seconds, ping-sweep the local /24 + read the
+    ARP table (no elevation), then update the device cache. Devices present at
+    the first scan of this run are baselined (never alerted); a MAC that appears
+    later and isn't in netscan.known is flagged is_new (drives the advisor
+    intruder rule -> toast + dashboard). Never raises into the failover loop."""
+    ns = cfg.get("netscan", {})
+    if not ns.get("enabled", True):
+        return
+    if time.time() - _net_scan["last"] < ns.get("scan_interval_seconds", 60):
+        return
+    _net_scan["last"] = time.time()
+    try:
+        found = netroute.lan_scan()
+    except Exception as exc:                       # scan must never break failover
+        log.debug("lan_scan failed: %s", exc)
+        return
+    now = time.time()
+    known = {str(e.get("mac", "")).upper(): e for e in ns.get("known", []) if e.get("mac")}
+    ignore = {str(m).upper() for m in ns.get("ignore", [])}
+    if _net_scan["baseline"] is None:              # first scan this run = baseline
+        _net_scan["baseline"] = {d["mac"] for d in found}
+    baseline = _net_scan["baseline"]
+    seen_now = set()
+    for d in found:
+        mac = d["mac"]
+        if mac in ignore:
+            continue
+        seen_now.add(mac)
+        rec = _net_devices.setdefault(mac, {"mac": mac, "first_seen": now})
+        is_known = mac in known
+        rec.update({
+            "ip": d["ip"], "state": d["state"], "randomized": d["randomized"],
+            "last_seen": now, "online": True, "known": is_known,
+            "name": (known[mac].get("name") if is_known else rec.get("name", "")),
+            "is_new": (not is_known) and (mac not in baseline),
+        })
+    for mac, rec in _net_devices.items():          # devices no longer answering
+        if mac not in seen_now:
+            rec["online"] = False
+            rec["is_new"] = False
+    store.record_scan(_device_snapshot())          # persist registry + presence
+    if time.time() - _net_scan.get("last_prune", 0) > 21600:   # ~6h
+        _net_scan["last_prune"] = time.time()
+        store.prune(ns.get("db_retention_days", 0))
+
+
+def _device_snapshot():
+    """Device list for status.json + advisor: new & online first, then by IP."""
+    def key(r):
+        ip = [int(x) for x in r["ip"].split(".")] if r.get("ip") else [0, 0, 0, 0]
+        return (0 if r.get("is_new") else 1, 0 if r.get("online") else 1, ip)
+    return sorted(_net_devices.values(), key=key)
 
 
 _last_recovery: dict = {}   # adapter name -> last Restart-NetAdapter attempt
@@ -553,7 +615,7 @@ def toast_advice(advice, cfg):
             netroute.notify(a["title"] + " — open dashboard :8901 for fix steps")
 
 
-def write_status(links, chosen, cfg, dry_run, advice=None):
+def write_status(links, chosen, cfg, dry_run, advice=None, devices=None):
     """Publish a snapshot to logs/status.json for the dashboard to read."""
     snap = {
         "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -581,6 +643,7 @@ def write_status(links, chosen, cfg, dry_run, advice=None):
             for lk in links
         ],
         "history": list(_switch_history),
+        "devices": devices or [],
     }
     try:
         os.makedirs(os.path.dirname(STATUS_PATH), exist_ok=True)
@@ -692,11 +755,13 @@ def run_cycle(cfg, dry_run):
     links = managed_links(cfg)
     openwifi.tag_links(links)               # mark any joined open net untrusted
     refresh_win_checks(cfg)
+    maybe_scan_lan(cfg)
     if not links:
         log.warning("no managed WAN links found (are the phones connected?)")
-        advice = advisor.evaluate([], cfg, _last_seen, _unhealthy_since, _win_checks)
+        advice = advisor.evaluate([], cfg, _last_seen, _unhealthy_since, _win_checks,
+                                  devices=_device_snapshot())
         toast_advice(advice, cfg)
-        write_status([], None, cfg, dry_run, advice)
+        write_status([], None, cfg, dry_run, advice, devices=_device_snapshot())
         return links
 
     ensure_probe_routes(links, dry_run)
@@ -726,7 +791,8 @@ def run_cycle(cfg, dry_run):
 
     chosen = choose_link(links, cfg, _current_name)
     apply_choice(chosen, links, cfg, dry_run)
-    advice = advisor.evaluate(links, cfg, _last_seen, _unhealthy_since, _win_checks)
+    advice = advisor.evaluate(links, cfg, _last_seen, _unhealthy_since, _win_checks,
+                              devices=_device_snapshot())
     if _metric_fail_count[0] >= 3:
         advice = [{
             "id": "not-elevated", "severity": "crit",
@@ -735,8 +801,14 @@ def run_cycle(cfg, dry_run):
                       "Or run the daemon from an elevated PowerShell"],
             "why": "Set-NetIPInterface is failing, so failover can't actually switch links.",
         }] + advice
+    for a in advice:
+        if a["id"].startswith("intruder:"):
+            store.record_alert(a["id"].split(":", 1)[1], kind="intruder", note=a["title"])
+    store.record_link_samples(links, chosen.name if chosen else None,
+                              sample=cfg.get("netscan", {}).get("sample_link_quality", True),
+                              interval=cfg.get("netscan", {}).get("sample_interval_seconds", 0))
     toast_advice(advice, cfg)
-    write_status(links, chosen, cfg, dry_run, advice)
+    write_status(links, chosen, cfg, dry_run, advice, devices=_device_snapshot())
     return links
 
 
@@ -829,6 +901,10 @@ def main():
 
     cfg = load_config()
     setup_logging(cfg, args.verbose or args.once or args.dry_run)
+    try:
+        store.init_db()
+    except Exception as exc:                       # DB is optional, never fatal
+        log.warning("records DB unavailable: %s", exc)
 
     if args.status:
         cmd_status(cfg)

@@ -12,11 +12,15 @@ monkeypatch tcp_probe, so no PowerShell / sockets / elevation are touched.
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import time
 import unittest
 
+import advisor
 import linkkeeper as lk
 import netroute
+import store
 from netroute import WanLink, ps_quote
 
 
@@ -312,6 +316,111 @@ class TestProbeHealthDebounce(unittest.TestCase):
         lk.probe_link(link, cfg_for_probe(), st)   # one good probe
         self.assertTrue(link.healthy)
         self.assertEqual(st.consecutive_fail, 0)
+
+
+# --------------------------------------------------------------------------- #
+# netroute.lan_scan — parsing / filtering (mocked PowerShell)
+# --------------------------------------------------------------------------- #
+class TestLanScan(unittest.TestCase):
+    def setUp(self):
+        self._real = netroute._ps
+
+    def tearDown(self):
+        netroute._ps = self._real
+
+    def _mock(self, payload):
+        import json
+        netroute._ps = lambda *a, **k: json.dumps(payload)
+
+    def test_parses_and_flags_randomized(self):
+        # F4-BD-B9 = globally administered (real); D2-.. has the local bit set
+        self._mock([{"ip": "192.168.1.1", "mac": "F4-BD-B9-20-C4-1A", "state": "Reachable"},
+                    {"ip": "192.168.1.34", "mac": "D2-AC-87-9E-06-25", "state": "Stale"}])
+        d = {x["ip"]: x for x in netroute.lan_scan()}
+        self.assertEqual(len(d), 2)
+        self.assertFalse(d["192.168.1.1"]["randomized"])
+        self.assertTrue(d["192.168.1.34"]["randomized"])
+
+    def test_filters_multicast_broadcast(self):
+        self._mock([
+            {"ip": "192.168.1.5", "mac": "AA-11-22-33-44-55", "state": "Reachable"},
+            {"ip": "192.168.1.255", "mac": "FF-FF-FF-FF-FF-FF", "state": "Reachable"},
+            {"ip": "224.0.0.251", "mac": "01-00-5E-00-00-FB", "state": "Reachable"},
+            {"ip": "239.255.255.250", "mac": "01-00-5E-7F-FF-FA", "state": "Reachable"},
+        ])
+        d = netroute.lan_scan()
+        self.assertEqual([x["ip"] for x in d], ["192.168.1.5"])
+
+    def test_dedup_and_sorted(self):
+        self._mock([
+            {"ip": "192.168.1.20", "mac": "AA-11-22-33-44-55", "state": "Stale"},
+            {"ip": "192.168.1.3", "mac": "BB-11-22-33-44-55", "state": "Reachable"},
+            {"ip": "192.168.1.99", "mac": "AA-11-22-33-44-55", "state": "Reachable"},  # dup MAC
+        ])
+        d = netroute.lan_scan()
+        self.assertEqual(len(d), 2)                       # deduped by MAC
+        self.assertEqual([x["ip"] for x in d], ["192.168.1.3", "192.168.1.20"])  # sorted
+
+    def test_bad_output_is_empty(self):
+        netroute._ps = lambda *a, **k: "not json"
+        self.assertEqual(netroute.lan_scan(), [])
+
+
+# --------------------------------------------------------------------------- #
+# advisor intruder rule
+# --------------------------------------------------------------------------- #
+class TestIntruderRule(unittest.TestCase):
+    def _cfg(self, **ns):
+        base = {"enabled": True, "alert_new_devices": True}
+        base.update(ns)
+        return {"advisor": {"enabled": True}, "netscan": base, "links": []}
+
+    def test_new_device_makes_intruder_advice(self):
+        devs = [{"mac": "AA-BB", "ip": "192.168.1.9", "is_new": True, "known": False}]
+        adv = advisor.evaluate([], self._cfg(), {}, {}, {}, devices=devs)
+        self.assertTrue(any(a["id"] == "intruder:AA-BB" for a in adv))
+
+    def test_known_device_no_advice(self):
+        devs = [{"mac": "AA-BB", "is_new": False, "known": True}]
+        adv = advisor.evaluate([], self._cfg(), {}, {}, {}, devices=devs)
+        self.assertFalse(any(a["id"].startswith("intruder:") for a in adv))
+
+    def test_alerts_disabled(self):
+        devs = [{"mac": "AA-BB", "is_new": True, "known": False}]
+        adv = advisor.evaluate([], self._cfg(alert_new_devices=False), {}, {}, {}, devices=devs)
+        self.assertFalse(any(a["id"].startswith("intruder:") for a in adv))
+
+
+# --------------------------------------------------------------------------- #
+# store — SQLite records round-trip (temp file DB)
+# --------------------------------------------------------------------------- #
+class TestStore(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        store.init_db(os.path.join(self.dir, "t.db"))
+
+    def tearDown(self):
+        store.close()
+
+    def test_scan_registry_and_events(self):
+        store.record_scan([{"mac": "AA", "ip": "192.168.1.1", "online": True,
+                            "is_new": True, "first_seen": time.time()}])
+        self.assertEqual(store.stats()["devices"], 1)
+        self.assertGreaterEqual(len(store.recent_events()), 1)
+        self.assertIsNotNone(store.device_timeline("AA")["device"])
+
+    def test_switch_and_samples(self):
+        store.record_switch("a", "b", 5.0, "wired")
+        lk_obj = make_link("b")
+        lk_obj.latency_ms = 5.0
+        store.record_link_samples([lk_obj], "b")
+        self.assertEqual(len(store.switches()), 1)
+        self.assertGreaterEqual(len(store.link_series("b")), 1)
+
+    def test_alert_dedup(self):
+        store.record_alert("AA", note="x")
+        store.record_alert("AA", note="x")          # within 30 min -> deduped
+        self.assertEqual(store.stats()["alerts"], 1)
 
 
 if __name__ == "__main__":

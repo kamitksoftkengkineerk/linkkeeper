@@ -493,6 +493,84 @@ def _alias(if_index: int) -> str:
     return str(rows[0]["InterfaceAlias"]).strip() if rows else str(if_index)
 
 
+# ---- LAN device discovery (for the Network tab / new-device alerts) ---------
+# Primes the ARP/neighbor cache with a parallel async ping-sweep of the local
+# /24, then reads Get-NetNeighbor. Both steps are UNPRIVILEGED (Test/Ping uses
+# the Windows ICMP API, not raw sockets; the neighbor table is world-readable),
+# so this runs inline in the daemon with no command-bus/elevation. The sweep
+# fires 254 fire-and-forget SendPingAsync calls (300 ms each) then waits ~0.9 s,
+# so the whole thing finishes well under the 15 s _ps timeout.
+_LAN_SCAN_PS = r"""
+$r = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+if (-not $r) { '[]'; exit 0 }
+$ip = (Get-NetIPAddress -InterfaceIndex $r.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.PrefixOrigin -ne 'WellKnown' } | Select-Object -First 1).IPAddress
+if (-not $ip) { '[]'; exit 0 }
+$base = ($ip -split '\.')[0..2] -join '.'
+1..254 | ForEach-Object { [void](New-Object System.Net.NetworkInformation.Ping).SendPingAsync("$base.$_", 300) }
+Start-Sleep -Milliseconds 900
+$dev = Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like "$base.*" -and ($_.State -eq 'Reachable' -or $_.State -eq 'Stale') -and $_.LinkLayerAddress -and $_.LinkLayerAddress -ne '00-00-00-00-00-00' } | Select-Object @{n='ip';e={$_.IPAddress}}, @{n='mac';e={$_.LinkLayerAddress}}, @{n='state';e={[string]$_.State}}
+if ($null -eq $dev) { '[]'; exit 0 }
+$dev | ConvertTo-Json -Depth 3 -Compress
+"""
+
+
+def _is_randomized_mac(mac: str) -> bool:
+    """True if the locally-administered bit is set (bit 1 of the first octet) —
+    the signature of a privacy-randomized MAC, e.g. a modern phone on Wi-Fi."""
+    try:
+        return bool(int(mac[0:2], 16) & 0x02)
+    except (ValueError, IndexError):
+        return False
+
+
+def lan_scan() -> list[dict]:
+    """Discover devices on the local /24. Returns [{ip, mac, state, randomized}]
+    sorted by IP, de-duped by MAC, with multicast/broadcast filtered out. Empty
+    on any failure. No elevation required."""
+    try:
+        out = (_ps(_LAN_SCAN_PS) or "").strip()
+    except RuntimeError:
+        return []
+    if not out:
+        return []
+    try:
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+    devices, seen = [], set()
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        ip = str(row.get("ip") or "").strip()
+        mac = str(row.get("mac") or "").strip().upper().replace(":", "-")
+        if not ip or len(mac) != 17:
+            continue
+        octets = ip.split(".")
+        if len(octets) != 4 or octets[-1] == "255":
+            continue
+        try:
+            if 224 <= int(octets[0]) <= 239:   # multicast range
+                continue
+        except ValueError:
+            continue
+        if mac == "FF-FF-FF-FF-FF-FF" or mac.startswith("01-00-5E"):
+            continue
+        if mac in seen:
+            continue
+        seen.add(mac)
+        devices.append({
+            "ip": ip, "mac": mac,
+            "state": str(row.get("state") or "").strip(),
+            "randomized": _is_randomized_mac(mac),
+        })
+    devices.sort(key=lambda d: [int(x) for x in d["ip"].split(".")])
+    return devices
+
+
 # ---- metric read / write ----------------------------------------------------
 
 def get_interface_metric(if_index: int) -> int:
