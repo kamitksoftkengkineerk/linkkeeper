@@ -166,6 +166,63 @@ WINDOWS_GUIDE = {
     },
 }
 
+# Phase 3 — router port findings. Deliberately honest framing: LinkKeeper only
+# confirms a TCP connect succeeds ("exposed service"), never claims a CVE or
+# vulnerability — that needs real fingerprinting this tool doesn't do.
+ROUTER_PORT_GUIDE = {
+    23: {
+        "label": "Telnet (23) is open on your router",
+        "why": "Telnet sends everything — including the admin password — in plain text, and is a classic router-botnet target (e.g. Mirai).",
+        "steps": ["Log into your router's admin page and disable Telnet/remote management",
+                   "If you never intentionally enabled it, this may be a factory default — turn it off"],
+    },
+    21: {
+        "label": "FTP (21) is open on your router",
+        "why": "Unauthenticated or weakly-authenticated FTP on a router is a common way in; it's rarely needed for normal use.",
+        "steps": ["Log into your router's admin page and disable the FTP/USB-sharing service if you aren't using it"],
+    },
+    7547: {
+        "label": "TR-069 (7547) is open on your router",
+        "why": "TR-069 is the remote-management protocol ISPs use to configure routers — if it's reachable from your LAN too, that's broader exposure than intended.",
+        "steps": ["This is usually ISP-managed; if your router isn't ISP-provided, disable TR-069/CWMP in its admin settings"],
+    },
+    5555: {
+        "label": "Port 5555 (Android ADB) is open on your router",
+        "why": "5555 is the Android debug-bridge port; on a router it usually means a compromised or misconfigured device offering remote shell access.",
+        "steps": ["Check your router's admin page for an unrecognised service or firmware issue",
+                   "Consider a factory reset + firmware update if this wasn't intentional"],
+    },
+    1900: {
+        "label": "UPnP/SSDP (1900) is open on your router",
+        "why": "UPnP lets any device on your LAN open ports on your router automatically — convenient, but it's also how malware silently exposes services to the internet.",
+        "steps": ["Log into your router's admin page and disable UPnP if you don't need automatic port forwarding",
+                   "Review the router's current port-forwarding list for anything you didn't set up"],
+    },
+    80: {
+        "label": "The router's admin page (port 80, unencrypted) is reachable",
+        "why": "Port 80 alone (no 443) means the admin login travels in plain text on your LAN — fine for local-only use, worth confirming it isn't also reachable from the internet.",
+        "steps": ["Confirm remote/WAN administration is OFF in your router's settings (most routers default to LAN-only)",
+                   "Prefer the HTTPS admin page (443) if your router offers one"],
+    },
+}
+
+
+def _router_advice(findings):
+    """One advisor item per open risky port on the gateway (honest: 'exposed
+    service' framing, no CVE claims). `findings` = [{port, host}, ...]."""
+    items = []
+    for f in findings:
+        port = f.get("port")
+        guide = ROUTER_PORT_GUIDE.get(port)
+        if not guide:
+            continue
+        items.append(_advice(
+            f"router:{port}", "warn", guide["label"], guide["steps"],
+            f"{guide['why']} (found open on {f.get('host', 'your router')} — "
+            "this is a reachability check, not a vulnerability scan.)",
+        ))
+    return items
+
 
 # ---------------------------------------------------------------------------
 # evaluation
@@ -176,7 +233,8 @@ def _advice(aid, severity, title, steps, why):
             "steps": list(steps), "why": why}
 
 
-def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None, devices=None):
+def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None, devices=None,
+             router_findings=None):
     """Return the list of currently-active advice items."""
     now = now or time.time()
     adv_cfg = cfg.get("advisor", {})
@@ -301,6 +359,10 @@ def evaluate(links, cfg, last_seen, unhealthy_since, win_checks, now=None, devic
                  "If you don't recognise it, check who's on your Wi-Fi and change the password"],
                 f"A device ({d.get('ip', '?')} · {d['mac']}{rnd}) joined that wasn't present when LinkKeeper started and isn't in your trusted list.",
             ))
+
+    # --- router: risky exposed services (Phase 3) ---
+    if router_findings:
+        advice.extend(_router_advice(router_findings))
 
     return advice
 

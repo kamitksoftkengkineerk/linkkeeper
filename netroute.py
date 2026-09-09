@@ -579,6 +579,41 @@ $dev | ConvertTo-Json -Depth 3 -Compress
 """
 
 
+def default_gateway() -> str:
+    """IPv4 address of the current default-route gateway, or '' if none. Used to
+    find "the router" to check in Phase 3, independent of which WAN link is
+    primary right now (the router itself doesn't change when links fail over)."""
+    try:
+        rows = _ps_json(
+            "Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 "
+            "-ErrorAction SilentlyContinue | Sort-Object RouteMetric | "
+            "Select-Object -First 1 NextHop"
+        )
+    except RuntimeError:
+        return ""
+    if not rows:
+        return ""
+    gw = str(rows[0].get("NextHop") or "").strip()
+    return gw if gw and gw != "0.0.0.0" else ""
+
+
+def tcp_port_open(host: str, port: int, timeout: float = 1.5) -> bool:
+    """True if a TCP connect to host:port succeeds within timeout. Used for the
+    Phase 3 router check (small set of risky ports on the gateway) — a plain
+    reachability probe, not a vulnerability scanner; a service being reachable
+    is reported as "exposed", never as a CVE claim."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.settimeout(timeout)
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
 def _is_randomized_mac(mac: str) -> bool:
     """True if the locally-administered bit is set (bit 1 of the first octet) —
     the signature of a privacy-randomized MAC, e.g. a modern phone on Wi-Fi."""

@@ -57,6 +57,12 @@ _wifi_bad_cycles = 0                         # consecutive cycles current hotspo
 _net_scan: dict = {"last": 0.0, "baseline": None}   # rate-limit ts + first-scan MAC set
 _net_devices: dict = {}                             # mac -> device record
 _wifi_scan: dict = {"last": 0.0, "nets": []}        # nearby-Wi-Fi cache (slower interval)
+_router_scan: dict = {"last": 0.0, "findings": []}  # risky-port cache (slowest interval)
+
+# Small, deliberately conservative set of ports worth flagging if reachable on
+# the gateway — services that are either legacy-insecure (telnet, ftp) or
+# unusual enough on a consumer router to be worth a look (adb, TR-069, UPnP).
+_ROUTER_RISKY_PORTS = [23, 21, 7547, 5555, 1900, 80]
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +561,35 @@ def maybe_scan_wifi(cfg):
         _wifi_scan["nets"] = []
 
 
+def maybe_scan_router(cfg):
+    """Every netscan.router_scan_interval_seconds (default 1h), TCP-connect to
+    a small set of risky ports on the gateway. Reachability check only — never
+    claims a CVE/vulnerability, just "this port answers" (see advisor.py). Each
+    connect attempt has its own short timeout so a filtered/black-holed port
+    can't stall the daemon; the whole scan runs well under a failover cycle.
+    Never raises into the failover loop."""
+    ns = cfg.get("netscan", {})
+    if not ns.get("enabled", True) or not ns.get("router_scan", True):
+        return
+    interval = ns.get("router_scan_interval_seconds", 3600)
+    if time.time() - _router_scan["last"] < interval:
+        return
+    _router_scan["last"] = time.time()
+    try:
+        gw = netroute.default_gateway()
+        _router_scan["gateway"] = gw
+        if not gw:
+            _router_scan["findings"] = []
+            return
+        ports = ns.get("router_ports") or _ROUTER_RISKY_PORTS
+        findings = [{"port": p, "host": gw} for p in ports
+                    if netroute.tcp_port_open(gw, p, timeout=1.5)]
+        _router_scan["findings"] = findings
+    except Exception as exc:                       # scan must never break failover
+        log.debug("router scan failed: %s", exc)
+        _router_scan["findings"] = []
+
+
 _last_recovery: dict = {}   # adapter name -> last Restart-NetAdapter attempt
 _stale_cycles: dict = {}    # adapter name -> consecutive cycles seen stale
 
@@ -668,6 +703,8 @@ def write_status(links, chosen, cfg, dry_run, advice=None, devices=None):
         "history": list(_switch_history),
         "devices": devices or [],
         "wifi_nearby": _wifi_scan["nets"],
+        "router": {"gateway": _router_scan.get("gateway", ""),
+                   "findings": _router_scan["findings"]},
     }
     try:
         os.makedirs(os.path.dirname(STATUS_PATH), exist_ok=True)
@@ -781,10 +818,11 @@ def run_cycle(cfg, dry_run):
     refresh_win_checks(cfg)
     maybe_scan_lan(cfg)
     maybe_scan_wifi(cfg)
+    maybe_scan_router(cfg)
     if not links:
         log.warning("no managed WAN links found (are the phones connected?)")
         advice = advisor.evaluate([], cfg, _last_seen, _unhealthy_since, _win_checks,
-                                  devices=_device_snapshot())
+                                  devices=_device_snapshot(), router_findings=_router_scan["findings"])
         toast_advice(advice, cfg)
         write_status([], None, cfg, dry_run, advice, devices=_device_snapshot())
         return links
@@ -817,7 +855,7 @@ def run_cycle(cfg, dry_run):
     chosen = choose_link(links, cfg, _current_name)
     apply_choice(chosen, links, cfg, dry_run)
     advice = advisor.evaluate(links, cfg, _last_seen, _unhealthy_since, _win_checks,
-                              devices=_device_snapshot())
+                              devices=_device_snapshot(), router_findings=_router_scan["findings"])
     if _metric_fail_count[0] >= 3:
         advice = [{
             "id": "not-elevated", "severity": "crit",

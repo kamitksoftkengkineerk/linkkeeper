@@ -41,6 +41,7 @@ ALLOWED_SETTINGS = {
     "netscan.enabled", "netscan.alert_new_devices",
     "netscan.scan_interval_seconds", "netscan.known", "netscan.ignore",
     "netscan.scan_wifi", "netscan.wifi_scan_interval_seconds",
+    "netscan.router_scan", "netscan.router_scan_interval_seconds",
 }
 
 
@@ -349,6 +350,7 @@ function wifiRow(w){
     <span class="wifi-meta">${esc(meta)}</span>
     <span class="wifi-sig">${sig}%</span></div>`;
 }
+const PORT_NAMES={23:'Telnet',21:'FTP',7547:'TR-069',5555:'ADB',1900:'UPnP/SSDP',80:'HTTP admin'};
 function renderNetwork(){
   const devs=STATUS.devices||[]; const ns=CONFIG.netscan||{};
   const nnew=devs.filter(d=>d.is_new).length, online=devs.filter(d=>d.online).length;
@@ -362,10 +364,25 @@ function renderNetwork(){
     wifiSection=`<h2 class="nsec">Wi-Fi Nearby${wifi.length?` · ${wifi.length}`:''}</h2>
       <p class="sub">Access points your Wi-Fi radio can see right now, strongest first.</p>${body}`;
   }
+  let routerSection='';
+  if(ns.router_scan!==false){
+    const r=STATUS.router||{}; const findings=r.findings||[];
+    const body = !r.gateway
+      ? '<p class="empty">Router not identified yet.</p>'
+      : findings.length
+        ? `<div class="wifi-list">${findings.map(f=>`<div class="wifi-row">
+             <span class="tag warn" style="flex:0 0 auto">exposed</span>
+             <span class="wifi-ssid">${esc(PORT_NAMES[f.port]||('Port '+f.port))} (${f.port})</span>
+             <span class="wifi-meta">${esc(f.host||r.gateway)}</span></div>`).join('')}</div>`
+        : `<p class="empty">No risky ports found open on ${esc(r.gateway)}. ✓</p>`;
+    routerSection=`<h2 class="nsec">Router${findings.length?` · ${findings.length} exposed`:''}</h2>
+      <p class="sub">A reachability check on your gateway's known-risky ports — not a vulnerability scan.</p>${body}`;
+  }
   $('#v-network').innerHTML = `<h1>Network</h1>
     <p class="sub">${off}${devs.length} device${devs.length===1?'':'s'} on your LAN · ${online} online${nnew?` · <span style=color:var(--warn)>${nnew} new</span>`:''}. Trust the ones that are yours — you will be alerted when a new one appears.</p>
     <div class="grid">${devs.length?devs.map(deviceCard).join(''):'<p class="empty">No devices seen yet — the daemon scans every minute.</p>'}</div>
-    ${wifiSection}`;
+    ${wifiSection}
+    ${routerSection}`;
 }
 function renderAdvisor(){
   const adv=STATUS.advice||[];
@@ -454,6 +471,8 @@ function renderSettings(){
     ${numRow('Scan interval (s)','How often to sweep the network for devices.','netscan.scan_interval_seconds',(c.netscan&&c.netscan.scan_interval_seconds)||60)}
     ${toggleRow('List nearby Wi-Fi','Show access points your radio can see on the Network tab. Needs Windows Location on.','netscan.scan_wifi',!(c.netscan)||c.netscan.scan_wifi!==false)}
     ${numRow('Wi-Fi scan interval (s)','How often to refresh the nearby-Wi-Fi list (heavier than the LAN scan).','netscan.wifi_scan_interval_seconds',(c.netscan&&c.netscan.wifi_scan_interval_seconds)||300)}
+    ${toggleRow('Check the router for exposed services','TCP-probe a handful of risky ports (telnet, FTP, UPnP...) on your gateway. Reachability check only, not a vulnerability scan.','netscan.router_scan',!(c.netscan)||c.netscan.router_scan!==false)}
+    ${numRow('Router check interval (s)','How often to re-check the router.','netscan.router_scan_interval_seconds',(c.netscan&&c.netscan.router_scan_interval_seconds)||3600)}
     <h2>Setup</h2>
     <div class="row"><div><div class="lbl">Re-run the setup wizard</div><div class="desc">Detect connections, apply Windows fixes, install autostart.</div></div>
       <button data-act="openwizard">Open wizard</button></div>`;

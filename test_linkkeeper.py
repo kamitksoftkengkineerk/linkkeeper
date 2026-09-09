@@ -534,5 +534,135 @@ class TestWlanScanAll(unittest.TestCase):
         self.assertEqual(netroute.wlan_scan_all(), [])
 
 
+# --------------------------------------------------------------------------- #
+# router security check (Phase 3)
+# --------------------------------------------------------------------------- #
+class TestDefaultGateway(unittest.TestCase):
+    def setUp(self):
+        self._real = netroute._ps_json
+
+    def tearDown(self):
+        netroute._ps_json = self._real
+
+    def test_returns_gateway(self):
+        netroute._ps_json = lambda *a, **k: [{"NextHop": "192.168.1.1"}]
+        self.assertEqual(netroute.default_gateway(), "192.168.1.1")
+
+    def test_no_route_returns_empty(self):
+        netroute._ps_json = lambda *a, **k: []
+        self.assertEqual(netroute.default_gateway(), "")
+
+    def test_zero_gateway_returns_empty(self):
+        netroute._ps_json = lambda *a, **k: [{"NextHop": "0.0.0.0"}]
+        self.assertEqual(netroute.default_gateway(), "")
+
+    def test_ps_failure_returns_empty(self):
+        def boom(*a, **k):
+            raise RuntimeError("no route")
+        netroute._ps_json = boom
+        self.assertEqual(netroute.default_gateway(), "")
+
+
+class TestTcpPortOpen(unittest.TestCase):
+    def test_closed_port_is_false(self):
+        # Port 1 on loopback should not have a listener in any test environment.
+        self.assertFalse(netroute.tcp_port_open("127.0.0.1", 1, timeout=0.3))
+
+    def test_open_port_is_true(self):
+        import socket
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            self.assertTrue(netroute.tcp_port_open("127.0.0.1", port, timeout=1.0))
+        finally:
+            srv.close()
+
+
+class TestMaybeScanRouter(unittest.TestCase):
+    def setUp(self):
+        lk._router_scan["last"] = 0.0
+        lk._router_scan["findings"] = []
+        self._real_gw = netroute.default_gateway
+        self._real_open = netroute.tcp_port_open
+
+    def tearDown(self):
+        netroute.default_gateway = self._real_gw
+        netroute.tcp_port_open = self._real_open
+
+    def test_disabled_skips_scan(self):
+        netroute.default_gateway = lambda: "192.168.1.1"
+        lk.maybe_scan_router({"netscan": {"enabled": True, "router_scan": False}})
+        self.assertEqual(lk._router_scan["findings"], [])
+        self.assertEqual(lk._router_scan["last"], 0.0)   # never even ran
+
+    def test_finds_open_risky_port(self):
+        netroute.default_gateway = lambda: "192.168.1.1"
+        netroute.tcp_port_open = lambda host, port, timeout=1.5: port == 23
+        lk.maybe_scan_router({"netscan": {"enabled": True, "router_scan": True,
+                                          "router_ports": [23, 21]}})
+        self.assertEqual(lk._router_scan["findings"],
+                         [{"port": 23, "host": "192.168.1.1"}])
+
+    def test_no_open_ports_is_empty(self):
+        netroute.default_gateway = lambda: "192.168.1.1"
+        netroute.tcp_port_open = lambda *a, **k: False
+        lk.maybe_scan_router({"netscan": {"enabled": True, "router_scan": True}})
+        self.assertEqual(lk._router_scan["findings"], [])
+
+    def test_no_gateway_is_empty(self):
+        netroute.default_gateway = lambda: ""
+        lk.maybe_scan_router({"netscan": {"enabled": True, "router_scan": True}})
+        self.assertEqual(lk._router_scan["findings"], [])
+
+    def test_scan_error_never_raises(self):
+        def boom():
+            raise RuntimeError("ps died")
+        netroute.default_gateway = boom
+        lk.maybe_scan_router({"netscan": {"enabled": True, "router_scan": True}})  # must not raise
+        self.assertEqual(lk._router_scan["findings"], [])
+
+    def test_rate_limited(self):
+        calls = []
+        netroute.default_gateway = lambda: calls.append(1) or "192.168.1.1"
+        netroute.tcp_port_open = lambda *a, **k: False
+        cfg = {"netscan": {"enabled": True, "router_scan": True,
+                           "router_scan_interval_seconds": 3600}}
+        lk.maybe_scan_router(cfg)
+        lk.maybe_scan_router(cfg)                  # second call within the hour -> skipped
+        self.assertEqual(len(calls), 1)
+
+
+class TestRouterAdvice(unittest.TestCase):
+    def _cfg(self):
+        return {"advisor": {"enabled": True}, "links": []}
+
+    def test_known_risky_port_makes_advice(self):
+        adv = advisor.evaluate([], self._cfg(), {}, {}, {},
+                               router_findings=[{"port": 23, "host": "192.168.1.1"}])
+        self.assertTrue(any(a["id"] == "router:23" for a in adv))
+        item = next(a for a in adv if a["id"] == "router:23")
+        self.assertEqual(item["severity"], "warn")
+        self.assertIn("Telnet", item["title"])
+
+    def test_no_findings_no_advice(self):
+        adv = advisor.evaluate([], self._cfg(), {}, {}, {}, router_findings=[])
+        self.assertFalse(any(a["id"].startswith("router:") for a in adv))
+
+    def test_unknown_port_ignored(self):
+        # a port with no guide entry should be silently skipped, not crash
+        adv = advisor.evaluate([], self._cfg(), {}, {}, {},
+                               router_findings=[{"port": 99999, "host": "x"}])
+        self.assertFalse(any(a["id"].startswith("router:") for a in adv))
+
+    def test_never_claims_cve(self):
+        adv = advisor.evaluate([], self._cfg(), {}, {}, {},
+                               router_findings=[{"port": 1900, "host": "192.168.1.1"}])
+        item = next(a for a in adv if a["id"] == "router:1900")
+        self.assertNotIn("cve", item["why"].lower())
+        self.assertNotIn("cve", item["title"].lower())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
