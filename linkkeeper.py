@@ -531,6 +531,46 @@ def maybe_scan_lan(cfg):
     if time.time() - _net_scan.get("last_prune", 0) > 21600:   # ~6h
         _net_scan["last_prune"] = time.time()
         store.prune(ns.get("db_retention_days", 0))
+        _prune_devices(ns)
+
+
+def _prune_devices(ns: dict) -> None:
+    """Evict UNKNOWN/untrusted, OFFLINE entries from the live _net_devices
+    registry so it can't grow forever over months/years of uptime (phones that
+    rotate their Wi-Fi MAC for privacy otherwise leave a permanent dead entry
+    behind every rotation). Known/trusted devices and anything currently
+    ONLINE are never evicted, regardless of age. Does not touch SQLite —
+    store.record_scan() already persisted every device's latest snapshot
+    there earlier this cycle, so this only declutters the live view
+    (status.json + Network tab); full history stays on the History tab.
+
+    Two offline-and-unknown-only passes:
+      1. TTL — evict once offline longer than unknown_device_ttl_days.
+      2. Count cap — backstop: if still over max_unknown_devices after the
+         TTL pass, drop the least-recently-seen offline-unknown entries
+         until at/under the cap (catches a burst of rotation/drive-by MACs
+         that hasn't aged out yet). Either check is disabled at 0 (matches
+         db_retention_days' own "0 = keep forever" convention)."""
+    ttl_days = ns.get("unknown_device_ttl_days", 14)
+    if ttl_days and ttl_days > 0:
+        cutoff = time.time() - ttl_days * 86400
+        stale = [mac for mac, r in _net_devices.items()
+                 if not r.get("known") and not r.get("online")
+                 and r.get("last_seen", 0) < cutoff]
+        for mac in stale:
+            del _net_devices[mac]
+
+    max_unknown = ns.get("max_unknown_devices", 200)
+    if max_unknown and max_unknown > 0:
+        unknown_total = sum(1 for r in _net_devices.values() if not r.get("known"))
+        over = unknown_total - max_unknown
+        if over > 0:
+            offline_unknown = sorted(
+                (r for r in _net_devices.values()
+                 if not r.get("known") and not r.get("online")),
+                key=lambda r: r.get("last_seen", 0))
+            for r in offline_unknown[:over]:
+                _net_devices.pop(r["mac"], None)
 
 
 def _device_snapshot():

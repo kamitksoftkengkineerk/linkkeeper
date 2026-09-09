@@ -269,6 +269,9 @@ def _band_for_channel(ch: int) -> str:
     return ""
 
 
+_WIFI_NEARBY_CAP = 40  # top-N by signal strength, see the return statement below
+
+
 def wlan_scan_all() -> list[dict]:
     """Scan for ALL nearby Wi-Fi networks (not just open ones) for the Network
     tab's "Wi-Fi Nearby" view. Returns [{ssid, signal, channel, band, auth,
@@ -319,7 +322,9 @@ def wlan_scan_all() -> list[dict]:
             "secured": bool(auth) and "open" not in auth.lower(),
         })
     out.sort(key=lambda n: -n["signal"])
-    return out
+    return out[:_WIFI_NEARBY_CAP]   # defensive cap — a dense environment (apartment
+                                     # building) can return dozens+; keep only the
+                                     # strongest, which are the only ones actually useful
 
 
 _OPEN_PROFILE_XML = """<?xml version="1.0"?>

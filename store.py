@@ -261,7 +261,12 @@ def device_timeline(mac, limit=200):
         return {"device": None, "events": [], "alerts": []}
 
 
-def link_series(link, since=None, limit=3000):
+def link_series(link, since=None, limit=20000):
+    # limit is a safety cap, not the primary bound — callers should pass
+    # `since` to bound by time first (the dashboard's only call site does:
+    # last 6h, then downsample_series() to a fixed point budget). 20000
+    # matches that call site's own limit so the default isn't a smaller,
+    # undocumented number nobody chose on purpose.
     try:
         con = _reader()
         if since:

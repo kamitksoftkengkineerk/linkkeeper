@@ -578,6 +578,119 @@ class TestWlanScanAll(unittest.TestCase):
         netroute._netsh = lambda *a, **k: fp
         self.assertEqual(netroute.wlan_scan_all(), [])
 
+    def test_capped_at_wifi_nearby_limit(self):
+        # a dense environment (apartment building) can return dozens+ SSIDs —
+        # confirm the result never exceeds _WIFI_NEARBY_CAP, and keeps the
+        # strongest ones (not an arbitrary/early-seen subset).
+        blocks = []
+        for i in range(60):
+            blocks.append(
+                f"SSID {i} : Net{i}\n"
+                "    Authentication          : WPA2-Personal\n"
+                f"    BSSID 1                 : aa:bb:cc:dd:ee:{i:02x}\n"
+                f"         Signal             : {i}%\n"
+                "         Channel            : 6\n"
+            )
+        netroute._netsh = lambda *a, **k: _FakeProc("\n".join(blocks))
+        nets = netroute.wlan_scan_all()
+        self.assertEqual(len(nets), netroute._WIFI_NEARBY_CAP)
+        self.assertEqual(nets[0]["ssid"], "Net59")   # strongest (99%->59%) kept, not first-seen
+
+
+# --------------------------------------------------------------------------- #
+# _prune_devices — bounds the live Network-tab device registry
+# --------------------------------------------------------------------------- #
+class TestPruneDevices(unittest.TestCase):
+    def setUp(self):
+        lk._net_devices.clear()
+
+    def tearDown(self):
+        lk._net_devices.clear()
+
+    def _dev(self, mac, *, known=False, online=False, last_seen):
+        return {"mac": mac, "known": known, "online": online, "last_seen": last_seen}
+
+    def test_known_device_never_evicted_regardless_of_age(self):
+        lk._net_devices["AA"] = self._dev("AA", known=True, online=False,
+                                          last_seen=time.time() - 999 * 86400)
+        lk._prune_devices({"unknown_device_ttl_days": 1, "max_unknown_devices": 0})
+        self.assertIn("AA", lk._net_devices)
+
+    def test_unknown_offline_past_ttl_is_evicted(self):
+        lk._net_devices["BB"] = self._dev("BB", known=False, online=False,
+                                          last_seen=time.time() - 20 * 86400)
+        lk._prune_devices({"unknown_device_ttl_days": 14})
+        self.assertNotIn("BB", lk._net_devices)
+
+    def test_unknown_online_survives_ttl(self):
+        lk._net_devices["CC"] = self._dev("CC", known=False, online=True,
+                                          last_seen=time.time() - 999 * 86400)
+        lk._prune_devices({"unknown_device_ttl_days": 1})
+        self.assertIn("CC", lk._net_devices)   # currently answering -> never evicted
+
+    def test_count_cap_evicts_least_recently_seen_first(self):
+        now = time.time()
+        for i in range(5):
+            mac = f"D{i}"
+            lk._net_devices[mac] = self._dev(mac, known=False, online=False,
+                                             last_seen=now - (5 - i) * 3600)  # D0 oldest
+        lk._prune_devices({"unknown_device_ttl_days": 0, "max_unknown_devices": 3})
+        self.assertEqual(len(lk._net_devices), 3)
+        self.assertNotIn("D0", lk._net_devices)
+        self.assertIn("D4", lk._net_devices)   # most recently seen kept
+
+    def test_both_disabled_at_zero_evicts_nothing(self):
+        lk._net_devices["EE"] = self._dev("EE", known=False, online=False,
+                                          last_seen=time.time() - 999 * 86400)
+        lk._prune_devices({"unknown_device_ttl_days": 0, "max_unknown_devices": 0})
+        self.assertIn("EE", lk._net_devices)
+
+    def test_prune_does_not_touch_sqlite_history(self):
+        d = tempfile.mkdtemp()
+        store.init_db(os.path.join(d, "t.db"))
+        try:
+            mac = "FF"
+            store.record_scan([{"mac": mac, "ip": "192.168.1.5", "online": False,
+                                "is_new": False, "first_seen": time.time() - 30 * 86400}])
+            lk._net_devices[mac] = self._dev(mac, known=False, online=False,
+                                             last_seen=time.time() - 30 * 86400)
+            lk._prune_devices({"unknown_device_ttl_days": 1})
+            self.assertNotIn(mac, lk._net_devices)                       # evicted live
+            self.assertIsNotNone(store.device_timeline(mac)["device"])   # history intact
+        finally:
+            store.close()
+
+
+# --------------------------------------------------------------------------- #
+# dashboard.cap_devices / status_for_client — Network-tab render cap
+# --------------------------------------------------------------------------- #
+class TestCapDevices(unittest.TestCase):
+    def test_known_always_kept_unknown_trimmed_with_honest_total(self):
+        import dashboard
+        known = [{"mac": f"K{i}", "known": True} for i in range(5)]
+        unknown = [{"mac": f"U{i}", "known": False} for i in range(100)]
+        capped, total = dashboard.cap_devices(known + unknown)
+        self.assertEqual(total, 105)
+        self.assertEqual(len(capped), dashboard.NETWORK_DEVICE_CAP)
+        for d in known:
+            self.assertIn(d, capped)
+
+    def test_under_cap_passes_through_unchanged(self):
+        import dashboard
+        devices = [{"mac": f"X{i}", "known": False} for i in range(10)]
+        capped, total = dashboard.cap_devices(devices)
+        self.assertEqual(capped, devices)
+        self.assertEqual(total, 10)
+
+    def test_many_known_devices_can_exceed_the_cap(self):
+        # trusted devices are NEVER trimmed, even if there happen to be more
+        # of them than the cap — only unknown entries ever get cut.
+        import dashboard
+        known = [{"mac": f"K{i}", "known": True} for i in range(80)]
+        capped, total = dashboard.cap_devices(known)
+        self.assertEqual(len(capped), 80)
+        self.assertEqual(total, 80)
+
 
 # --------------------------------------------------------------------------- #
 # router security check (Phase 3)

@@ -43,6 +43,7 @@ ALLOWED_SETTINGS = {
     "netscan.scan_interval_seconds", "netscan.known", "netscan.ignore",
     "netscan.scan_wifi", "netscan.wifi_scan_interval_seconds",
     "netscan.router_scan", "netscan.router_scan_interval_seconds",
+    "netscan.unknown_device_ttl_days", "netscan.max_unknown_devices",
 }
 
 
@@ -52,6 +53,38 @@ def read_status() -> dict:
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+# Hard ceiling on device records served to the Network tab — independent of
+# linkkeeper.py's own live-registry eviction (netscan.unknown_device_ttl_days /
+# max_unknown_devices); protects the dashboard even if that eviction is off,
+# misconfigured, or status.json predates this upgrade.
+NETWORK_DEVICE_CAP = 60
+
+
+def cap_devices(devices: list) -> tuple:
+    """Trim `devices` to at most NETWORK_DEVICE_CAP entries. Every 'known'
+    (trusted, user-curated, small) device is always kept in full; unknown/seen
+    devices fill whatever budget remains, in their existing priority order
+    (new/online first — see linkkeeper._device_snapshot). Returns
+    (capped_list, original_count) so the client can render an honest
+    '+N more' note — same pattern as the sparkline's 'averaged from N samples'."""
+    known = [d for d in devices if d.get("known")]
+    unknown = [d for d in devices if not d.get("known")]
+    budget = max(0, NETWORK_DEVICE_CAP - len(known))
+    return known + unknown[:budget], len(devices)
+
+
+def status_for_client() -> dict:
+    """read_status() with the Network-tab device cap applied — the single seam
+    both GET /api/status and the SSE stream go through, so neither path can
+    bypass it."""
+    snap = read_status()
+    devices = snap.get("devices") or []
+    capped, total = cap_devices(devices)
+    if total > len(capped):
+        snap = dict(snap, devices=capped, devices_total=total)
+    return snap
 
 
 def read_config() -> dict:
@@ -483,8 +516,10 @@ function renderNetwork(){
     routerSection=`<h2 class="nsec">Router${findings.length?` · ${findings.length} exposed`:''}</h2>
       <p class="sub">A reachability check on your gateway's known-risky ports — not a vulnerability scan.</p>${body}`;
   }
+  const devTotal=STATUS.devices_total||devs.length;
+  const capNote = devTotal>devs.length ? ` · showing ${devs.length} of ${devTotal} — see History for the rest` : '';
   $('#v-network').innerHTML = `<h1>Network</h1>
-    <p class="sub">${off}${devs.length} device${devs.length===1?'':'s'} on your LAN · ${online} online${nnew?` · <span style=color:var(--warn)>${nnew} new</span>`:''}. Trust the ones that are yours — you will be alerted when a new one appears.</p>
+    <p class="sub">${off}${devs.length} device${devs.length===1?'':'s'} on your LAN${capNote} · ${online} online${nnew?` · <span style=color:var(--warn)>${nnew} new</span>`:''}. Trust the ones that are yours — you will be alerted when a new one appears.</p>
     <div class="grid">${devs.length?devs.map(deviceCard).join(''):'<p class="empty">No devices seen yet — the daemon scans every minute.</p>'}</div>
     ${wifiSection}
     ${routerSection}`;
@@ -537,7 +572,7 @@ function drawHistory(){
   if(!h){ el.innerHTML='<h1>History</h1><p class="empty">No records yet — the daemon fills this over time.</p>'; return; }
   const st=h.stats||{}, mb=((st.db_bytes||0)/1048576).toFixed(1), now=Date.now()/1000;
   const chart=STATUS.primary?sparkline(histSeries, STATUS.primary):'';
-  const dv=(h.devices||[]).map(d=>`<tr><td>${esc(d.name||d.mac)}</td><td>${esc(d.last_ip||'')}</td><td>${fmtAge(now-(d.last_seen||now))}</td><td>${esc(tsStr(d.first_seen))}</td><td>${d.trusted?'✓':''}${d.randomized?' 🎲':''}</td></tr>`).join('');
+  const dv=(h.devices||[]).slice(0,50).map(d=>`<tr><td>${esc(d.name||d.mac)}</td><td>${esc(d.last_ip||'')}</td><td>${fmtAge(now-(d.last_seen||now))}</td><td>${esc(tsStr(d.first_seen))}</td><td>${d.trusted?'✓':''}${d.randomized?' 🎲':''}</td></tr>`).join('');
   const ev=(h.events||[]).slice(0,80).map(e=>`<tr><td>${esc(tsStr(e.ts))}</td><td>${esc(e.mac)}</td><td><span class="tag ${e.event==='new'?'warn':''}">${esc(e.event)}</span></td><td>${esc(e.ip||'')}</td></tr>`).join('');
   const sw=(h.switches||[]).slice(0,40).map(s=>`<tr><td>${esc(tsStr(s.ts))}</td><td>${esc(s.from_link)} → ${esc(s.to_link)}</td><td>${s.latency_ms==null?'':s.latency_ms+' ms'}</td><td>${esc(s.reason||'')}</td></tr>`).join('');
   const out=(h.outages||[]).slice(0,25).map(o=>`<tr><td>${esc(tsStr(o.started))}</td><td>${o.ended?esc(tsStr(o.ended)):'ongoing'}</td><td>${o.duration_s?Math.round(o.duration_s)+' s':''}</td></tr>`).join('');
@@ -580,6 +615,8 @@ function renderSettings(){
     ${numRow('Wi-Fi scan interval (s)','How often to refresh the nearby-Wi-Fi list (heavier than the LAN scan).','netscan.wifi_scan_interval_seconds',(c.netscan&&c.netscan.wifi_scan_interval_seconds)||300)}
     ${toggleRow('Check the router for exposed services','TCP-probe a handful of risky ports (telnet, FTP, UPnP...) on your gateway. Reachability check only, not a vulnerability scan.','netscan.router_scan',!(c.netscan)||c.netscan.router_scan!==false)}
     ${numRow('Router check interval (s)','How often to re-check the router.','netscan.router_scan_interval_seconds',(c.netscan&&c.netscan.router_scan_interval_seconds)||3600)}
+    ${numRow('Forget unknown devices after (days)','Untrusted/unknown devices offline this long are dropped from the live Network view. History is never deleted — see the History tab. 0 = never.','netscan.unknown_device_ttl_days',(c.netscan&&c.netscan.unknown_device_ttl_days)??14)}
+    ${numRow('Max unknown devices shown','Safety cap on how many untrusted/unknown devices are kept live at once (oldest-offline dropped first). Trusted devices are never capped. 0 = no cap.','netscan.max_unknown_devices',(c.netscan&&c.netscan.max_unknown_devices)??200)}
     <h2>Setup</h2>
     <div class="row"><div><div class="lbl">Re-run the setup wizard</div><div class="desc">Detect connections, apply Windows fixes, install autostart.</div></div>
       <button data-act="openwizard">Open wizard</button></div>`;
@@ -713,13 +750,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/" or path.startswith("/index"):
             self._send(200, PAGE, "text/html; charset=utf-8")
         elif path.startswith("/api/status"):
-            self._send(200, json.dumps(read_status()))
+            self._send(200, json.dumps(status_for_client()))
         elif path.startswith("/api/config"):
             self._send(200, json.dumps(read_config()))
         elif path.startswith("/api/history"):
             self._send(200, json.dumps({
                 "devices": store.all_devices(300),
-                "events": store.recent_events(200),
+                "events": store.recent_events(100),  # client renders at most 80 — small buffer, not 120 of overfetch
                 "switches": store.switches(100),
                 "outages": store.outage_log(50),
                 "stats": store.stats(),
@@ -784,7 +821,7 @@ class Handler(BaseHTTPRequestHandler):
                 now = time.time()
                 if changed:
                     last_status_mtime, last_config_mtime = smtime, cmtime
-                    payload = json.dumps({"status": read_status(), "config": read_config()})
+                    payload = json.dumps({"status": status_for_client(), "config": read_config()})
                     self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                     self.wfile.flush()
                     last_sent = now
