@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions / discussion
+    url: https://github.com/kamitksoftkengkineerk/linkkeeper/discussions
+    about: For "does this fit my setup" questions or general discussion, not a concrete bug/feature.

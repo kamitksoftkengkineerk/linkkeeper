@@ -23,6 +23,12 @@ degrades or dies, it fails over in seconds. Install once and forget it.
 - 💡 **Advisor** — tells you *why* a link died, with the exact per-device fix
 - 🔒 **Local & private** — no subscription, no VPN, no traffic through anyone's servers
 
+> **Freshly public — testers wanted.** This just came out of a private repo after months of daily
+> personal use, but it's only been run on its author's own hardware/link combos so far. If you try
+> it on a different setup (different phones, carriers, adapters), an
+> [issue](../../issues/new/choose) about anything that breaks — or even just "worked fine on X" —
+> is genuinely useful. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Quick start
 
 ```powershell
