@@ -246,3 +246,9 @@ not routing gets bounced with `Restart-NetAdapter` automatically (no replug).
 MIT — see [LICENSE](LICENSE). Provided **as is, without warranty of any kind**:
 LinkKeeper changes network routing and Windows power settings on the machine it
 runs on. Read what it does before pointing it at anything you care about.
+
+## Built by
+
+**[Volenth AI Private Limited](https://volenth.ai)** — CIN `U62011DC2026PTC473838` ·
+GSTIN `07AAMCV5453B1ZA` · DPIIT-recognized startup (cert `DIPP277008`) · Udyam
+`UDYAM-DL-11-0168945` (Micro enterprise). DUNS: not yet assigned.
