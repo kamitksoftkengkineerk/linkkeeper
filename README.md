@@ -257,4 +257,4 @@ runs on. Read what it does before pointing it at anything you care about.
 
 **[Volenth AI Private Limited](https://volenth.ai)** — CIN `U62011DC2026PTC473838` ·
 GSTIN `07AAMCV5453B1ZA` · DPIIT-recognized startup (cert `DIPP277008`) · Udyam
-`UDYAM-DL-11-0168945` (Micro enterprise). DUNS: not yet assigned.
+`UDYAM-DL-11-0168945` (Micro enterprise) · DUNS `31-175-1017`.
