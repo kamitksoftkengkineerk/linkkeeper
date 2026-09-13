@@ -247,6 +247,12 @@ not routing gets bounced with `Restart-NetAdapter` automatically (no replug).
 - Bonding (combining both links' speed) is a separate, later project — see the
   plan (Speedify or self-hosted OpenMPTCProuter on a VPS).
 
+## Related projects
+
+An Android companion (self-contained on-device connection monitor + diagnostic Advisor — a
+different codebase, not a client of this app's dashboard) is in development. Link added here
+once it's public.
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Provided **as is, without warranty of any kind**:
