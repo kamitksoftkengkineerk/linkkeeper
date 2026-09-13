@@ -259,6 +259,23 @@ PAGE = r"""<!doctype html>
   .adv .why{color:var(--dim);font-size:12.5px;margin:8px 0 2px} .adv ol{margin:6px 0 4px 20px;font-size:13px}
   .adv .sev{margin-right:6px} .adv.crit .sev{color:var(--down)} .adv.warn .sev{color:var(--warn)} .adv.info .sev{color:var(--pri)}
   .hidden{display:none!important}
+  /* speed/feel: instant press feedback, smooth tab transitions, toast confirmations */
+  button{transition:background .12s ease,transform .08s ease,opacity .12s ease}
+  button:active{transform:scale(.96)}
+  button.busy{opacity:.65;pointer-events:none}
+  .card{transition:border-color .15s ease,box-shadow .15s ease}
+  .view-wrap>section{animation:lk-fade-in .15s ease both}
+  @keyframes lk-fade-in{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:translateY(0)}}
+  .toast-stack{position:fixed;bottom:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:100;
+    pointer-events:none}
+  .toast{background:var(--card);border:1px solid var(--stroke);border-radius:calc(var(--radius) - 2px);
+    padding:9px 14px;font-size:13px;font-weight:500;box-shadow:0 6px 20px rgba(0,0,0,.25);
+    display:flex;align-items:center;gap:8px;animation:lk-toast-in .18s ease both}
+  .toast.leaving{animation:lk-toast-out .18s ease both}
+  .toast .ic{color:var(--up)}
+  .toast.err .ic{color:var(--down)}
+  @keyframes lk-toast-in{from{opacity:0;transform:translateY(6px) scale(.97)}to{opacity:1;transform:translateY(0) scale(1)}}
+  @keyframes lk-toast-out{from{opacity:1;transform:translateY(0)}to{opacity:0;transform:translateY(6px)}}
   /* wizard */
   .wz{position:fixed;inset:0;background:color-mix(in oklch, var(--bg) 72%, transparent);backdrop-filter:blur(6px);
     display:grid;place-items:center;z-index:50;padding:20px}
@@ -307,6 +324,7 @@ PAGE = r"""<!doctype html>
 </div>
 </div>
 <div id="wizard" class="wz hidden"></div>
+<div class="toast-stack" id="toastStack"></div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -322,6 +340,16 @@ async function api(path, body, method){
 }
 let STATUS={}, CONFIG={};
 function fmtAge(s){ return s<2?'just now':(s<60?Math.round(s)+'s ago':Math.round(s/60)+'m ago'); }
+
+// ---- toast confirmations (instant feedback for actions, no waiting on a refresh) ----
+function toast(msg, isErr){
+  const stack=$('#toastStack'); if(!stack) return;
+  const el=document.createElement('div');
+  el.className='toast'+(isErr?' err':'');
+  el.innerHTML=`<span class="ic">${isErr?'✕':'✓'}</span><span>${esc(msg)}</span>`;
+  stack.appendChild(el);
+  setTimeout(()=>{ el.classList.add('leaving'); setTimeout(()=>el.remove(), 200); }, 2200);
+}
 
 // ---- theme (shadcn: html.light / default dark), persisted ----
 function applyTheme(t){
@@ -623,21 +651,46 @@ function renderSettings(){
 }
 
 // ---- actions ----
-async function pin(name, pinned){ await api('/api/pin',{name:pinned?null:name}); refresh(); }
-async function setCfg(path, value){ await api('/api/config',{[path]:value}); await refresh(); }
+// Every action below is OPTIMISTIC: mutate the already-loaded STATUS/CONFIG in
+// memory + re-render immediately (feels instant — no waiting on a network
+// round-trip), fire the real API call in the background, then reconcile with
+// a normal refresh(). If the save fails, the next refresh()/SSE push corrects
+// the optimistic guess anyway, so this never drifts from server truth for long.
+async function pin(name, pinned){
+  const newPin = pinned ? null : name;
+  STATUS.manual_pin = newPin;
+  afterDataUpdate();
+  toast(newPin ? `Pinned ${newPin} as primary` : 'Unpinned — auto-select resumed');
+  try{ await api('/api/pin',{name:newPin}); }catch(e){ toast('Pin did not save — reverting', true); }
+  refresh();
+}
+async function setCfg(path, value){
+  try{ await api('/api/config',{[path]:value}); }catch(e){ toast('Save failed', true); }
+  await refresh();
+}
 function knownList(){ return ((CONFIG.netscan&&CONFIG.netscan.known)||[]).map(k=>Object.assign({},k)); }
 async function trustDevice(mac){
   const dev=(STATUS.devices||[]).find(d=>d.mac===mac); const known=knownList();
   if(known.some(k=>String(k.mac||'').toUpperCase()===mac)) return;
   known.push({mac:mac, name:(dev&&dev.name)||'', trusted:true});
-  await setCfg('netscan.known', known);
+  CONFIG.netscan=CONFIG.netscan||{}; CONFIG.netscan.known=known;
+  if(dev){ dev.known=true; dev.is_new=false; }   // card + Network badge update instantly
+  afterDataUpdate();
+  toast('Trusted'+(dev&&dev.vendor?` ${dev.vendor}`:dev&&dev.ip?` ${dev.ip}`:''));
+  try{ await api('/api/config',{'netscan.known': known}); }catch(e){ toast('Trust did not save', true); }
+  refresh();
 }
 async function nameDevice(mac){
   const dev=(STATUS.devices||[]).find(d=>d.mac===mac);
   const nm=prompt('Name this device:', (dev&&dev.name)||''); if(nm===null) return;
   const known=knownList(); const i=known.findIndex(k=>String(k.mac||'').toUpperCase()===mac);
   if(i>=0){ known[i].name=nm; known[i].trusted=true; } else { known.push({mac:mac, name:nm, trusted:true}); }
-  await setCfg('netscan.known', known);
+  CONFIG.netscan=CONFIG.netscan||{}; CONFIG.netscan.known=known;
+  if(dev){ dev.name=nm; dev.known=true; dev.is_new=false; }
+  afterDataUpdate();
+  toast(nm ? `Named "${nm}"` : 'Trusted');
+  try{ await api('/api/config',{'netscan.known': known}); }catch(e){ toast('Name did not save', true); }
+  refresh();
 }
 async function runCommand(action, args){
   const {id}=await api('/api/command',{action,args:args||{}});
