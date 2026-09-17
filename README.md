@@ -9,6 +9,9 @@ degrades or dies, it fails over in seconds. Install once and forget it.
 
 ![LinkKeeper dashboard](docs/dashboard.png)
 
+*Both links health-checked live, side by side — the "Recent Switches" row above is a real
+failover that happened automatically, no manual intervention.*
+
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-0078d6)
 ![python](https://img.shields.io/badge/python-3.10%2B-3776ab)
